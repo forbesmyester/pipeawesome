@@ -158,24 +158,15 @@ pub fn fan(input: Receiver<Option<String>>, count: usize) -> Vec<Receiver<Option
 pub fn funnel_write(inputs: &mut Vec<Receiver<Option<String>>>, sender: &SyncSender<Option<String>>) -> usize {
 
     for i in (0..inputs.len()).rev() {
-        let mut done = false;
-        while !done {
-            match &inputs[i].try_recv() {
-                Ok(None) => {
-                    &inputs.remove(i);
-                    done = true;
-                }
-                Ok(d) => {
-                    do_send(&sender, &d);
-                    done = true;
-                },
-                Err(TryRecvError::Empty) => {
-                    done = true;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    std::thread::sleep(std::time::Duration::from_millis(100))
-                }
+        match &inputs[i].try_recv() {
+            Ok(None) => {
+                &inputs.remove(i);
             }
+            Ok(d) => {
+                do_send(&sender, &d);
+            },
+            Err(TryRecvError::Empty) => (),
+            Err(TryRecvError::Disconnected) => (),
         }
     }
 
