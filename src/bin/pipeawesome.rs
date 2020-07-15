@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+use pipeawesome::ProcessStatus;
 use std::collections::HashMap;
-use pipeawesome::{ Buffer, CommandOutput, Command, Pipe, Processable, Pullable, SingleInput, SingleOutput, Sink, Tap, Fan, Funnel };
+use pipeawesome::{ Buffer, CommandOutput, Command, GetProcessable, ProcessableItem, Sink, StoppedBy, Tap };
 use petgraph::graph::{ Graph, EdgeIndex, NodeIndex };
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError, TryRecvError, Receiver};
 use petgraph::dot::Dot;
 
 
@@ -134,6 +137,52 @@ fn can_graph_shuffle() {
 
 // }
 
+type ControlId = usize;
+type ConnectionId = usize;
+#[derive(Hash, Debug)]
+struct ControlInput(ControlId, ConnectionId);
+struct AccountingMsg(ControlId, ProcessStatus);
+
+#[derive(Debug)]
+struct Accounting {
+    enter: HashMap<ControlInput, usize>,
+    leave: HashMap<ControlInput, usize>,
+    finished: BTreeSet<ControlId>,
+}
+
+impl Accounting {
+    fn new() -> Accounting {
+        Accounting {
+            enter: HashMap::new(),
+            leave: HashMap::new(),
+            finished: BTreeSet::new(),
+        }
+    }
+
+    fn update_stats(e_or_l: &mut HashMap<ControlInput, usize>, control_input: ControlInput, count: &usize) {
+        match e_or_l.get_mut(&control_input) {
+            None => { e_or_l.insert(control_input, *count); },
+            Some(current) => { *current = *current + count },
+        }
+    }
+
+    fn update(&mut self, control_id: usize, ps: ProcessStatus) {
+        for (connection_id, count) in ps.read_from.iter() {
+            Accounting::update_stats(&mut self.enter, ControlInput(control_id, *connection_id), count);
+        }
+        for (connection_id, count) in ps.wrote_to.iter() {
+            Accounting::update_stats(&mut self.leave, ControlInput(control_id, *connection_id), count);
+        }
+        match ps.stopped_by {
+            StoppedBy::ExhaustedInput => {
+                self.finished.insert(control_id);
+            }
+            _ => (),
+        }
+    }
+
+}
+
 
 fn main() {
 
@@ -143,49 +192,130 @@ fn main() {
     // funnel -> sink
 
     let mut tap = Tap::new(|| { std::io::stdin() });
-    let mut fan = Fan::new();
-    let mut buffer = Buffer::new();
+    let mut buffer_1 = Buffer::new();
+    buffer_1.add_input(1, tap.get_output().unwrap());
+    // let mut fan = Fan::new();
+    // let mut buffer = Buffer::new();
     let hm: HashMap<String, String> = HashMap::new();
     let mut command = Command::new("sed", ".", hm, vec!["s/^/ONE: /"]);
-    let mut pipe = Pipe::new();
+    // let mut pipe = Pipe::new();
+    // let mut funnel = Funnel::new();
+
+    // fan.set_input(tap.get_output().unwrap());
+    // buffer.set_input(fan.add_output().unwrap());
+    command.set_input(buffer_1.add_output().unwrap());
+    let mut buffer_2 = Buffer::new();
+    buffer_2.add_input(1, command.get_output(CommandOutput::Stdout).unwrap());
+    buffer_2.add_input(1, buffer_1.add_output().unwrap());
+
     let mut sink = Sink::new(|| { std::io::stdout() });
-    let mut funnel = Funnel::new();
+    sink.set_input(buffer_2.add_output().unwrap());
 
-    fan.set_input(tap.get_output().unwrap());
-    buffer.set_input(fan.add_output().unwrap());
-    command.set_input(buffer.get_output().unwrap());
-    pipe.set_input(command.get_output(CommandOutput::Stdout).unwrap());
+    let mut buffer_processor_1 = buffer_1.get_processor().unwrap();
+    let mut buffer_processor_2 = buffer_2.get_processor().unwrap();
+    let mut command_processor = command.get_processor().unwrap();
 
-    funnel.add_input(fan.add_output().unwrap());
-    funnel.add_input(pipe.get_output().unwrap());
+    // funnel.add_input(fan.add_output().unwrap());
+    // funnel.add_input(pipe.get_output().unwrap());
 
-    sink.set_input(funnel.get_output().unwrap());
+    // sink.set_input(funnel.get_output().unwrap());
 
-    let bs = buffer.get_buffer_size().unwrap();
-    std::thread::spawn(move || {
-        loop {
-            bs.recv();
-            // println!("BUFFER SIZE: {:?}", );
+    // let bs = buffer.get_buffer_size().unwrap();
+    // std::thread::spawn(move || {
+    //     loop {
+    //         bs.recv();
+    //         // println!("BUFFER SIZE: {:?}", );
+    //     }
+    // });
+    //
+
+    // sink.process();
+    //
+    impl PartialEq for ControlInput {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0 && self.1 == self.1
         }
-    });
-
-    std::thread::spawn(move || {
-        loop {
-            funnel.pull();
-            fan.pull();
-            pipe.pull();
-        }
-    });
-
-
-    println!("COMMAND: {:?}", command.process());
-    println!("BUFFER: {:?}", buffer.process());
-    println!("TAP: {:?}", tap.process());
-
-    for t in sink.process().unwrap() {
-        t.join().unwrap();
     }
-    // bs_thread.join().unwrap();
+    impl Eq for ControlInput {}
+
+    let (acc_tx_buffer, acc_rx): (SyncSender<AccountingMsg>, Receiver<AccountingMsg>) = sync_channel(1);
+    let join_handle = std::thread::spawn(move || {
+        let mut accounting = Accounting::new();
+        loop {
+            match acc_rx.recv() {
+                Ok(AccountingMsg(control_id, process_status)) => {
+                    accounting.update(control_id, process_status);
+                },
+                Err(e) => {
+                    panic!("Should not be here: {:?}", e)
+                },
+            }
+            if accounting.finished.len() == 5 {
+                println!("ACCOUNTING: {:?}", accounting);
+                return ();
+            }
+        }
+    });
+
+    let acc_tx_tap = acc_tx_buffer.clone();
+    let mut tap_processor = tap.get_processor().unwrap();
+    std::thread::spawn(move || {
+        loop {
+            const tap_id: usize = 0;
+            let pr = tap_processor.process();
+            match pr.stopped_by {
+                StoppedBy::ExhaustedInput => {
+                    acc_tx_tap.send(AccountingMsg(tap_id, pr));
+                    return ();
+                },
+                _ => {},
+            }
+            acc_tx_tap.send(AccountingMsg(tap_id, pr));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+
+    let acc_tx_sink = acc_tx_buffer.clone();
+    let mut sink_processor = sink.get_processor().unwrap();
+    // std::thread::spawn(move || {
+    //     loop {
+    //         const sink_id: usize = 3;
+    //         let pr = sink_processor.process();
+    //         println!("sink {:?}", pr);
+    //         match pr.stopped_by {
+    //             StoppedBy::ExhaustedInput => {
+    //                 acc_tx_sink.send(AccountingMsg(sink_id, pr));
+    //                 return ();
+    //             },
+    //             _ => {},
+    //         }
+    //         acc_tx_sink.send(AccountingMsg(sink_id, pr));
+    //         // std::thread::sleep(std::time::Duration::from_millis(100));
+    //     }
+    // });
+
+    std::thread::spawn(move || {
+        loop {
+
+            // println!("BP1: {:?}", buffer_processor_1.process());
+            // println!("BP2: {:?}", buffer_processor_2.process());
+            acc_tx_buffer.send(AccountingMsg(1, buffer_processor_1.process()));
+            acc_tx_buffer.send(AccountingMsg(2, buffer_processor_2.process()));
+            acc_tx_buffer.send(AccountingMsg(3, command_processor.process()));
+            acc_tx_buffer.send(AccountingMsg(4, sink_processor.process()));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+
+    // println!("COMMAND: {:?}", command.process());
+    // println!("BUFFER: {:?}", buffer.process());
+    // println!("TAP: {:?}", tap.process());
+
+    join_handle.join();
+    // for t in sink.process().unwrap() {
+    //     t.join().unwrap();
+    // }
+    // // bs_thread.join().unwrap();
 
 }
 
