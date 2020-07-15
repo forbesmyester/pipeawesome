@@ -28,7 +28,7 @@ jo control=OUT stream=STDIN source=JUST_RIGHT pre='OUT: '
 
 ### Tap
 
-![](./85931a42b554d58837ee54f5b81b13b0058baf36.svg "`dot` image")
+![](./b9f1b50e58de5c6ddd395bfb897f69bb7555c4e5.svg "`dot` image")
 
 #### 1
 
@@ -42,7 +42,7 @@ jo control=OUT stream=STDIN source=JUST_RIGHT pre='OUT: '
 
 ### Sink
 
-![](./30694427c550c03fdcb8973cbcaeca1dff2c5176.svg "`dot` image")
+![](./f2c439736bde9f607a8cb0641c4cd4a66b77a4c0.svg "`dot` image")
 
 #### 1 - First step is to process pending
 
@@ -56,7 +56,7 @@ jo control=OUT stream=STDIN source=JUST_RIGHT pre='OUT: '
 
 ### Buffer
 
-![](./c01303374d0f0d982b9219f81e8a2b02cc21573a.svg "`dot` image")
+![](./1fc2e454117f3a11be4ac4aa9a0d9583bee15f3c.svg "`dot` image")
 
 #### 1 - Sending data out, if possible
 

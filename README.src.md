@@ -35,6 +35,8 @@ OUTPUT: STDOUT: JUST_RIGHT: 3 + 4 + 15 + 15 + 15 - 1 - 1: 50
 ```dot
 digraph G {
 
+    rankdir="LR";
+
     subgraph cluster_tap {
         label = "tap";
         color=lightgrey;
@@ -77,6 +79,8 @@ digraph G {
 ```dot
 digraph G {
 
+    rankdir="LR";
+
     subgraph cluster_sink {
         label = "sink";
         color=lightgrey;
@@ -116,6 +120,8 @@ digraph G {
 
 ```dot
 digraph G {
+
+    rankdir="LR";
 
     subgraph cluster_buffer {
         label = "buffer";
