@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
-use pipeawesome::ProcessStatus;
 use std::collections::HashMap;
-use pipeawesome::{ Buffer, CommandOutput, Command, GetProcessable, ProcessableItem, Sink, StoppedBy, Tap };
+use self::controls::*;
+use self::config::*;
 use petgraph::graph::{ Graph, EdgeIndex, NodeIndex };
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError, TryRecvError, Receiver};
+use std::sync::mpsc::{sync_channel, SyncSender, Receiver};
 use petgraph::dot::Dot;
 
+mod controls;
+mod config;
 
 const INPUT: &str = "I";
 const COMMAND: &str = "C";
@@ -137,7 +139,7 @@ fn can_graph_shuffle() {
 
 // }
 
-type ControlId = usize;
+type ControlId = String;
 type ConnectionId = usize;
 #[derive(Hash, Debug)]
 struct ControlInput(ControlId, ConnectionId);
@@ -166,12 +168,12 @@ impl Accounting {
         }
     }
 
-    fn update(&mut self, control_id: usize, ps: ProcessStatus) {
+    fn update(&mut self, control_id: ControlId, ps: ProcessStatus) {
         for (connection_id, count) in ps.read_from.iter() {
-            Accounting::update_stats(&mut self.enter, ControlInput(control_id, *connection_id), count);
+            Accounting::update_stats(&mut self.enter, ControlInput(control_id.to_owned(), *connection_id), count);
         }
         for (connection_id, count) in ps.wrote_to.iter() {
-            Accounting::update_stats(&mut self.leave, ControlInput(control_id, *connection_id), count);
+            Accounting::update_stats(&mut self.leave, ControlInput(control_id.to_owned(), *connection_id), count);
         }
         match ps.stopped_by {
             StoppedBy::ExhaustedInput => {
@@ -181,6 +183,31 @@ impl Accounting {
         }
     }
 
+}
+
+
+fn get_graph() -> Graph<String, u32> {
+    let mut graph = Graph::<String, u32, petgraph::Directed, u32>::new();
+    let tap = graph.add_node("TAP-OUT0".to_owned());
+    let buf1i0 = graph.add_node("BUF1-IN0".to_owned());
+    let buf1o1 = graph.add_node("BUF1-OUT1".to_owned());
+    let buf1o2 = graph.add_node("BUF1-OUT2".to_owned());
+    let buf2i0 = graph.add_node("BUF2-IN0".to_owned());
+    let buf2i1 = graph.add_node("BUF2-IN1".to_owned());
+    let buf2o2 = graph.add_node("BUF2-OUT2".to_owned());
+    let cmdi0 = graph.add_node("CMD-IN0".to_owned());
+    let cmdo1 = graph.add_node("CMD-OUT1".to_owned());
+    let sink = graph.add_node("SINK-IN0".to_owned());
+
+    graph.extend_with_edges(&[
+        (tap, buf1i0, 0),
+        (buf1o1, cmdi0, 0),
+        (buf1o2, buf2i0, 0),
+        (cmdo1, buf2i1, 0),
+        (buf2o2, sink, 0),
+    ]);
+
+    graph
 }
 
 
@@ -203,10 +230,10 @@ fn main() {
 
     // fan.set_input(tap.get_output().unwrap());
     // buffer.set_input(fan.add_output().unwrap());
-    command.set_input(buffer_1.add_output().unwrap());
+    command.set_input(buffer_1.add_output().unwrap()).unwrap();
     let mut buffer_2 = Buffer::new();
-    buffer_2.add_input(1, command.get_output(CommandOutput::Stdout).unwrap());
-    buffer_2.add_input(1, buffer_1.add_output().unwrap());
+    buffer_2.add_input(1, command.get_output(CommandOutput::Stdout).unwrap()).unwrap();
+    buffer_2.add_input(1, buffer_1.add_output().unwrap()).unwrap();
 
     let mut sink = Sink::new(|| { std::io::stdout() });
     sink.set_input(buffer_2.add_output().unwrap());
@@ -215,22 +242,6 @@ fn main() {
     let mut buffer_processor_2 = buffer_2.get_processor().unwrap();
     let mut command_processor = command.get_processor().unwrap();
 
-    // funnel.add_input(fan.add_output().unwrap());
-    // funnel.add_input(pipe.get_output().unwrap());
-
-    // sink.set_input(funnel.get_output().unwrap());
-
-    // let bs = buffer.get_buffer_size().unwrap();
-    // std::thread::spawn(move || {
-    //     loop {
-    //         bs.recv();
-    //         // println!("BUFFER SIZE: {:?}", );
-    //     }
-    // });
-    //
-
-    // sink.process();
-    //
     impl PartialEq for ControlInput {
         fn eq(&self, other: &Self) -> bool {
             self.0 == other.0 && self.1 == self.1
@@ -239,6 +250,7 @@ fn main() {
     impl Eq for ControlInput {}
 
     let (acc_tx_buffer, acc_rx): (SyncSender<AccountingMsg>, Receiver<AccountingMsg>) = sync_channel(1);
+
     let join_handle = std::thread::spawn(move || {
         let mut accounting = Accounting::new();
         loop {
@@ -257,53 +269,25 @@ fn main() {
         }
     });
 
-    let acc_tx_tap = acc_tx_buffer.clone();
     let mut tap_processor = tap.get_processor().unwrap();
-    std::thread::spawn(move || {
-        loop {
-            const tap_id: usize = 0;
-            let pr = tap_processor.process();
-            match pr.stopped_by {
-                StoppedBy::ExhaustedInput => {
-                    acc_tx_tap.send(AccountingMsg(tap_id, pr));
-                    return ();
-                },
-                _ => {},
-            }
-            acc_tx_tap.send(AccountingMsg(tap_id, pr));
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    });
 
-    let acc_tx_sink = acc_tx_buffer.clone();
     let mut sink_processor = sink.get_processor().unwrap();
-    // std::thread::spawn(move || {
-    //     loop {
-    //         const sink_id: usize = 3;
-    //         let pr = sink_processor.process();
-    //         println!("sink {:?}", pr);
-    //         match pr.stopped_by {
-    //             StoppedBy::ExhaustedInput => {
-    //                 acc_tx_sink.send(AccountingMsg(sink_id, pr));
-    //                 return ();
-    //             },
-    //             _ => {},
-    //         }
-    //         acc_tx_sink.send(AccountingMsg(sink_id, pr));
-    //         // std::thread::sleep(std::time::Duration::from_millis(100));
-    //     }
-    // });
 
-    std::thread::spawn(move || {
+    let graph = get_graph();
+
+    let join_handle = std::thread::spawn(move || {
         loop {
+
+
 
             // println!("BP1: {:?}", buffer_processor_1.process());
             // println!("BP2: {:?}", buffer_processor_2.process());
-            acc_tx_buffer.send(AccountingMsg(1, buffer_processor_1.process()));
-            acc_tx_buffer.send(AccountingMsg(2, buffer_processor_2.process()));
-            acc_tx_buffer.send(AccountingMsg(3, command_processor.process()));
-            acc_tx_buffer.send(AccountingMsg(4, sink_processor.process()));
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            acc_tx_buffer.send(AccountingMsg("TAP".to_owned(), tap_processor.process())).unwrap();
+            acc_tx_buffer.send(AccountingMsg("BUF1".to_owned(), buffer_processor_1.process())).unwrap();
+            acc_tx_buffer.send(AccountingMsg("BUF2".to_owned(), buffer_processor_2.process())).unwrap();
+            acc_tx_buffer.send(AccountingMsg("CMD".to_owned(), command_processor.process())).unwrap();
+            acc_tx_buffer.send(AccountingMsg("SINK".to_owned(), sink_processor.process())).unwrap();
+            // std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
 
@@ -311,7 +295,7 @@ fn main() {
     // println!("BUFFER: {:?}", buffer.process());
     // println!("TAP: {:?}", tap.process());
 
-    join_handle.join();
+    join_handle.join().unwrap();
     // for t in sink.process().unwrap() {
     //     t.join().unwrap();
     // }
