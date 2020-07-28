@@ -1,3 +1,6 @@
+#[path = "common_types.rs"]
+pub mod common_types;
+
 use std::thread::JoinHandle;
 use std::collections::HashMap;
 use std::io::Write;
@@ -6,8 +9,13 @@ use std::sync::mpsc::channel;
 use std::path::Path;
 use std::ffi::OsStr;
 use std::sync::mpsc::{sync_channel, Sender, SyncSender, TrySendError, TryRecvError, Receiver};
+use super::common_types::*;
 
-type Line = Option<String>;
+const BUFREADER_CAPACITY: usize = 40;
+const BUFWRITER_CAPACITY: usize = 40;
+const INTERNAL_SYNC_CHANNEL_SIZE: usize = 1024;
+
+pub type Line = Option<String>;
 
 type ReadFrom = HashMap<usize, usize>;
 type WroteTo = HashMap<usize, usize>;
@@ -21,9 +29,24 @@ pub enum StoppedBy {
     InternallyFull,
 }
 
+pub trait GetRead {
+    type R: std::io::Read;
+    fn get_read(&self) -> Self::R;
+}
+
+pub trait GetWrite {
+    type W: std::io::Write;
+    fn get_write(&self) -> Self::W;
+}
 
 pub trait Processable {
     fn process(&mut self) -> ProcessStatus;
+}
+
+
+pub trait InputOutput {
+    fn add_input(&mut self, input: Receiver<Line>) -> Result<(), CannotAllocateInputError>;
+    fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Receiver<Line>, CannotAllocateOutputError>;
 }
 
 
@@ -88,28 +111,28 @@ impl std::fmt::Display for SinkWriteError {
 
 
 #[derive(Debug)]
-pub enum OutputAlreadyUsedError {
-    OutputAlreadyUsedError,
+pub enum CannotAllocateOutputError {
+    CannotAllocateOutputError,
 }
 
-impl std::fmt::Display for OutputAlreadyUsedError {
+impl std::fmt::Display for CannotAllocateOutputError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            OutputAlreadyUsedError::OutputAlreadyUsedError => write!(f, "OutputAlreadyUsedError"),
+            CannotAllocateOutputError::CannotAllocateOutputError => write!(f, "CannotAllocateOutputError"),
         }
     }
 }
 
 
 #[derive(Debug)]
-pub enum InputAlreadyUsedError {
-    InputAlreadyUsedError,
+pub enum CannotAllocateInputError {
+    CannotAllocateInputError,
 }
 
-impl std::fmt::Display for InputAlreadyUsedError {
+impl std::fmt::Display for CannotAllocateInputError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            InputAlreadyUsedError::InputAlreadyUsedError => write!(f, "InputAlreadyUsedError"),
+            CannotAllocateInputError::CannotAllocateInputError => write!(f, "CannotAllocateInputError"),
         }
     }
 }
@@ -171,35 +194,49 @@ fn do_sync_send(tx: &SyncSender<Line>, msg: &Option<String>) {
 }
 
 
-pub struct Tap<R> where R: std::io::Read {
+#[derive(Debug)]
+pub struct Tap<R> where R: GetRead {
     tx: Option<SyncSender<Line>>,
-    get_buf: Option<fn() -> R>,
+    get_buf: Option<R>,
 }
 
-impl <R: std::io::Read> Tap<R> where {
+impl <R: GetRead + Send> Tap<R> {
 
-    pub fn new(get_buf: fn() -> R) -> Tap<R> {
+    pub fn new(get_buf: R) -> Tap<R> {
         Tap {
             tx: None,
             get_buf: Some(get_buf),
         }
     }
 
-    pub fn get_output(&mut self) -> Result<Receiver<Line>, OutputAlreadyUsedError> {
+}
 
-        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+impl <R: GetRead + Send> InputOutput for Tap<R> {
+
+    fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Receiver<Line>, CannotAllocateOutputError> {
+
+        match s {
+            Port::ERR => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
+            _ => (),
+        }
+
+        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
 
         if self.tx.is_none() {
             std::mem::replace(&mut self.tx, Some(tx));
             return Ok(rx)
         }
-        Err(OutputAlreadyUsedError::OutputAlreadyUsedError)
+        Err(CannotAllocateOutputError::CannotAllocateOutputError)
     }
 
+    fn add_input(&mut self, _: Receiver<Line>) -> Result<(), CannotAllocateInputError> {
+        Err(CannotAllocateInputError::CannotAllocateInputError)
+    }
 }
 
 
-impl <R: 'static +  std::io::Read> GetProcessable<TapProcessor<R>> for Tap<R> {
+impl <R: 'static +  GetRead + Send> GetProcessable for Tap<R> {
+    type Processor = TapProcessor<R>;
     fn get_processor(&mut self) -> Result<TapProcessor<R>, ProcessorAlreadyUsedError> {
 
         match (std::mem::take(&mut self.tx), std::mem::take(&mut self.get_buf)) {
@@ -218,14 +255,14 @@ pub struct TapProcessor<R> {
     int_tx: Option<SyncSender<Line>>,
     int_rx: Receiver<Line>,
     jh: Option<JoinHandle<()>>,
-    get_buf: Option<fn() -> R>,
+    get_buf: Option<R>,
     pending: Option<Line>,
 }
 
-impl <R: 'static +  std::io::Read> TapProcessor<R> {
+impl <R: 'static +  GetRead + Send> TapProcessor<R> {
 
-    fn new(get_buf: fn() -> R, tx: SyncSender<Line>) -> TapProcessor<R> {
-        let (int_tx, int_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+    fn new(get_buf: R, tx: SyncSender<Line>) -> TapProcessor<R> {
+        let (int_tx, int_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
         let mut t = TapProcessor {
             get_buf: Some(get_buf),
             tx: tx,
@@ -254,7 +291,8 @@ impl <R: 'static +  std::io::Read> TapProcessor<R> {
 
             (Some(get_buf), Some(int_tx)) => {
                 std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
-                    let mut buf = std::io::BufReader::new(get_buf());
+                    let r: &mut dyn std::io::Read = &mut get_buf.get_read();
+                    let mut buf = std::io::BufReader::with_capacity(BUFREADER_CAPACITY, r);
                     loop {
                         match command_read_std(&mut buf, &int_tx) {
                             Ok(false) => {
@@ -317,7 +355,7 @@ impl <R: 'static +  std::io::Read> TapProcessor<R> {
 
 }
 
-impl <R: 'static +  std::io::Read> Processable for TapProcessor<R> {
+impl <R: 'static +  GetRead + Send> Processable for TapProcessor<R> {
     fn process(&mut self) -> ProcessStatus {
 
 
@@ -348,29 +386,40 @@ impl <R: 'static +  std::io::Read> Processable for TapProcessor<R> {
 }
 
 
-pub struct Sink<O> where O: std::io::Write {
+#[derive(Debug)]
+pub struct Sink<W> where W: GetWrite {
     input: Option<Receiver<Line>>,
-    get_buf: Option<fn() -> O>,
+    get_buf: Option<W>,
 }
 
-impl <O: std::io::Write> Sink<O> where {
-    pub fn new(get_buf: fn() -> O) -> Sink<O> {
+impl <W: GetWrite + Send> Sink<W> where {
+    pub fn new(get_buf: W) -> Sink<W> {
         Sink {
             input: None,
             get_buf: Some(get_buf),
         }
     }
 
-    pub fn set_input(&mut self, input: Receiver<Line>) -> Result<(), InputAlreadyUsedError> {
+}
+
+impl <W: GetWrite + Send> InputOutput for Sink<W> {
+
+    fn get_output(&mut self, _: &Port, channel_size: usize) -> Result<Receiver<Line>, CannotAllocateOutputError> {
+        Err(CannotAllocateOutputError::CannotAllocateOutputError)
+    }
+
+    fn add_input(&mut self, input: Receiver<Line>) -> Result<(), CannotAllocateInputError> {
         if self.input.is_none() {
             std::mem::replace(&mut self.input, Some(input));
             return Ok(())
         }
-        Err(InputAlreadyUsedError::InputAlreadyUsedError)
+        Err(CannotAllocateInputError::CannotAllocateInputError)
     }
 }
 
-impl <W: 'static +  std::io::Write> GetProcessable<SinkProcessor<W>> for Sink<W> {
+
+impl <W: 'static + GetWrite + Send> GetProcessable for Sink<W> {
+    type Processor = SinkProcessor<W>;
     fn get_processor(&mut self) -> Result<SinkProcessor<W>, ProcessorAlreadyUsedError> {
 
         match (std::mem::take(&mut self.input), std::mem::take(&mut self.get_buf)) {
@@ -384,19 +433,19 @@ impl <W: 'static +  std::io::Write> GetProcessable<SinkProcessor<W>> for Sink<W>
 }
 
 
-pub struct SinkProcessor<W> where W: std::io::Write {
+pub struct SinkProcessor<W> {
     rx: Receiver<Line>,
-    get_w: Option<fn() -> W>,
+    get_w: Option<W>,
     jh: Option<JoinHandle<()>>,
     int_tx: SyncSender<Line>,
     int_rx: Option<Receiver<Line>>,
     pending: Option<Line>,
 }
 
-impl <W: 'static +  std::io::Write> SinkProcessor<W> {
+impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
 
-    fn new(w: fn() -> W, rx: Receiver<Line>) -> SinkProcessor<W> {
-        let (int_tx, int_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+    fn new(w: W, rx: Receiver<Line>) -> SinkProcessor<W> {
+        let (int_tx, int_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
         let mut r = SinkProcessor { get_w: Some(w), rx, jh: None, int_tx: int_tx, int_rx: Some(int_rx), pending: None };
         r.setup();
         r
@@ -407,23 +456,27 @@ impl <W: 'static +  std::io::Write> SinkProcessor<W> {
         match (std::mem::take(&mut self.int_rx), std::mem::take(&mut self.get_w)) {
             (Some(int_rx), Some(get_buf)) => {
                 std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
-                    let mut wr = std::io::BufWriter::new(get_buf());
+                    let mut wr = std::io::BufWriter::with_capacity(BUFWRITER_CAPACITY, get_buf.get_write());
                     loop {
                         match int_rx.recv() {
                             Ok(None) => {
-                                wr.flush();
+                                match wr.flush() {
+                                    Ok(_) => (),
+                                    Err(e) => panic!("Error: {}", e),
+                                }
                                 return ();
                             }
                             Ok(Some(line)) => {
                                 match wr.write_all(line.as_bytes()) {
-                                    Err(e) => {
-                                        return ();
-                                    }
+                                    Err(e) => panic!("Error: {}", e),
                                     _ => {},
                                 }
                             }
                             Err(_) => {
-                                wr.flush();
+                                match wr.flush() {
+                                    Ok(_) => (),
+                                    Err(e) => panic!("Error: {}", e),
+                                }
                                 std::thread::sleep(std::time::Duration::from_millis(10));
                             },
                         }
@@ -461,7 +514,7 @@ impl <W: 'static +  std::io::Write> SinkProcessor<W> {
 }
 
 
-impl <W: 'static +  std::io::Write> Processable for SinkProcessor<W> {
+impl <W: 'static + Send + GetWrite> Processable for SinkProcessor<W> {
     fn process(&mut self) -> ProcessStatus {
 
         if self.get_w.is_some() {
@@ -495,12 +548,6 @@ impl <W: 'static +  std::io::Write> Processable for SinkProcessor<W> {
 }
 
 
-pub enum CommandOutput {
-    Stdout,
-    Stderr,
-}
-
-
 #[derive(Debug)]
 pub struct Command<E, A, O, K, V, P>
     where E: IntoIterator<Item = (K, V)>,
@@ -519,6 +566,7 @@ pub struct Command<E, A, O, K, V, P>
     stdin: Option<Receiver<Line>>,
 }
 
+
 impl <E: IntoIterator<Item = (K, V)>,
           A: IntoIterator<Item = O>,
           O: AsRef<OsStr>,
@@ -530,41 +578,6 @@ impl <E: IntoIterator<Item = (K, V)>,
         Command { command, path, env: Some(env), args: Some(args), stdin: None, stdout: None, stderr: None }
     }
 
-    pub fn set_input(&mut self, input: Receiver<Line>) -> Result<(), InputAlreadyUsedError> {
-        if self.stdin.is_none() {
-            std::mem::replace(&mut self.stdin, Some(input));
-            return Ok(());
-        }
-        Err(InputAlreadyUsedError::InputAlreadyUsedError)
-    }
-
-    pub fn get_output(&mut self, s: CommandOutput) -> Result<Receiver<Line>, OutputAlreadyUsedError> {
-
-        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
-
-        match s {
-            CommandOutput::Stderr => {
-                match &self.stderr {
-                    Some(_) => Err(OutputAlreadyUsedError::OutputAlreadyUsedError),
-                    None => {
-                        std::mem::replace(&mut self.stderr, Some(tx));
-                        Ok(rx)
-                    }
-                }
-            },
-            CommandOutput::Stdout => {
-                match &self.stdout {
-                    Some(_) => Err(OutputAlreadyUsedError::OutputAlreadyUsedError),
-                    None => {
-                        std::mem::replace(&mut self.stdout, Some(tx));
-                        Ok(rx)
-                    }
-                }
-            },
-        }
-
-    }
-
 }
 
 impl <E: IntoIterator<Item = (K, V)>,
@@ -572,7 +585,9 @@ impl <E: IntoIterator<Item = (K, V)>,
           O: AsRef<OsStr>,
           K: AsRef<OsStr>,
           V: AsRef<OsStr>,
-          P: AsRef<Path>> GetProcessable<CommandProcessor> for Command<E, A, O, K, V, P> {
+          P: AsRef<Path>> GetProcessable for Command<E, A, O, K, V, P> {
+
+    type Processor = CommandProcessor;
 
     fn get_processor(&mut self) -> Result<CommandProcessor, ProcessorAlreadyUsedError> {
 
@@ -604,6 +619,52 @@ impl <E: IntoIterator<Item = (K, V)>,
 
     }
 }
+
+
+impl <E: IntoIterator<Item = (K, V)>,
+          A: IntoIterator<Item = O>,
+          O: AsRef<OsStr>,
+          K: AsRef<OsStr>,
+          V: AsRef<OsStr>,
+          P: AsRef<Path>> InputOutput for Command<E, A, O, K, V, P> {
+
+    fn add_input(&mut self, input: Receiver<Line>) -> Result<(), CannotAllocateInputError> {
+        if self.stdin.is_none() {
+            std::mem::replace(&mut self.stdin, Some(input));
+            return Ok(());
+        }
+        Err(CannotAllocateInputError::CannotAllocateInputError)
+    }
+
+    fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Receiver<Line>, CannotAllocateOutputError> {
+
+        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
+
+        match s {
+            Port::ERR => {
+                match &self.stderr {
+                    Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+                    None => {
+                        std::mem::replace(&mut self.stderr, Some(tx));
+                        Ok(rx)
+                    }
+                }
+            },
+            Port::OUT => {
+                match &self.stdout {
+                    Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+                    None => {
+                        std::mem::replace(&mut self.stdout, Some(tx));
+                        Ok(rx)
+                    }
+                }
+            },
+        }
+
+    }
+
+}
+
 
 #[derive(Debug)]
 pub struct CommandProcessor {
@@ -663,6 +724,7 @@ impl CommandProcessor {
         {
             let mut s = String::new();
             let count = br.read_line(&mut s)?;
+            // println!("CMD: {}", s);
             let v = if count == 0 { None } else { Some(s) };
             do_sync_send(tx, &v);
             Ok(count != 0)
@@ -670,7 +732,7 @@ impl CommandProcessor {
 
         let stdin_joinhandle = match std::mem::take(&mut self.stdin) {
             Some(mut stdin) => {
-                let (inner_stdin_tx, inner_stdin_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+                let (inner_stdin_tx, inner_stdin_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
                 std::mem::swap(&mut self.inner_stdin_tx, &mut Some(inner_stdin_tx));
                 Some(std::thread::spawn(move || {
                     loop {
@@ -699,10 +761,10 @@ impl CommandProcessor {
 
         let stdout_joinhandle = match std::mem::take(&mut self.stdout) {
             Some(stdout) => {
-                let (inner_stdout_tx, inner_stdout_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+                let (inner_stdout_tx, inner_stdout_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
                 std::mem::swap(&mut self.inner_stdout_rx, &mut Some(inner_stdout_rx));
                 Some(std::thread::spawn(move || {
-                    let mut br = std::io::BufReader::new(stdout);
+                    let mut br = std::io::BufReader::with_capacity(BUFREADER_CAPACITY, stdout);
                     loop {
                         match command_read_stdxxx(&mut br, &inner_stdout_tx) {
                             Ok(false) => {
@@ -725,10 +787,10 @@ impl CommandProcessor {
 
         let stderr_joinhandle = match std::mem::take(&mut self.stderr) {
             Some(stderr) => {
-                let (inner_stderr_tx, inner_stderr_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
+                let (inner_stderr_tx, inner_stderr_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
                 std::mem::swap(&mut self.inner_stderr_rx, &mut Some(inner_stderr_rx));
                 Some(std::thread::spawn(move || {
-                    let mut br = std::io::BufReader::new(stderr);
+                    let mut br = std::io::BufReader::with_capacity(BUFREADER_CAPACITY, stderr);
                     loop {
                         match command_read_stdxxx(&mut br, &inner_stderr_tx) {
                             Ok(false) => {
@@ -917,6 +979,7 @@ impl Processable for CommandProcessor {
 }
 
 
+#[derive(Debug)]
 pub struct Buffer {
     input: Vec<(usize, Receiver<Line>)>,
     int: Option<(Sender<Line>, Receiver<Line>)>,
@@ -940,36 +1003,51 @@ impl Buffer {
 
     }
 
-    pub fn add_output(&mut self) -> Result<Receiver<Line>, ProcessorAlreadyUsedError> {
-
-        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(1);
-        match &self.int {
-            Some(_) => {
-                self.output.push(tx);
-                Ok(rx)
-            },
-            None => return Err(ProcessorAlreadyUsedError::ProcessorAlreadyUsedError),
-        }
-
-    }
-
-    pub fn add_input(&mut self, priority: usize, rx: Receiver<Line>) -> Result<(), ProcessorAlreadyUsedError> {
+    pub fn add_input_with_priority(&mut self, priority: usize, rx: Receiver<Line>) -> Result<(), CannotAllocateInputError> {
         match &self.int {
             Some(_vec) => {
                 self.input.push((priority, rx));
                 Ok(())
             },
-            None => return Err(ProcessorAlreadyUsedError::ProcessorAlreadyUsedError),
+            None => return Err(CannotAllocateInputError::CannotAllocateInputError),
         }
     }
 
 }
 
-pub trait GetProcessable<P> {
-    fn get_processor(&mut self) -> Result<P, ProcessorAlreadyUsedError>;
+impl InputOutput for Buffer {
+
+    fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Receiver<Line>, CannotAllocateOutputError> {
+
+        match s {
+            Port::ERR => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
+            _ => (),
+        }
+
+        let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
+        match &self.int {
+            Some(_) => {
+                self.output.push(tx);
+                Ok(rx)
+            },
+            None => return Err(CannotAllocateOutputError::CannotAllocateOutputError),
+        }
+
+    }
+
+    fn add_input(&mut self, rx: Receiver<Line>) -> Result<(), CannotAllocateInputError> {
+        self.add_input_with_priority(50, rx)
+    }
+
 }
 
-impl GetProcessable<BufferProcessor> for Buffer {
+pub trait GetProcessable {
+    type Processor: Processable;
+    fn get_processor(&mut self) -> Result<Self::Processor, ProcessorAlreadyUsedError>;
+}
+
+impl GetProcessable for Buffer {
+    type Processor = BufferProcessor;
 
     fn get_processor(&mut self) -> Result<BufferProcessor, ProcessorAlreadyUsedError> {
         match (std::mem::take(&mut self.int), std::mem::take(&mut self.buffer_size_output)) {
