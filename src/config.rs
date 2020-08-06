@@ -1,24 +1,22 @@
 #[path = "common_types.rs"]
 mod common_types;
 
-use std::ffi::{ OsStr, OsString };
-use std::convert::From;
+use std::ffi::{ OsStr };
+use petgraph::dot::Dot;
 use std::path::Path;
-use petgraph::csr::Neighbors;
 use std::iter::IntoIterator;
 use std::cmp::{ Ord, Ordering };
 use std::collections::{ BTreeMap, HashMap, BTreeSet };
 use petgraph::stable_graph::{ StableGraph, NodeIndex };
 use petgraph::{ Direction };
-use petgraph::dot::Dot;
-use petgraph::visit::Bfs;
 use serde::Deserialize;
 use super::common_types::*;
 
-#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord, Hash, Copy)]
 pub enum SpecType {
-    CommandSpec,
     BufferSpec,
+    CommandSpec,
+    JunctionSpec,
     SinkSpec,
     TapSpec,
 }
@@ -26,6 +24,7 @@ pub enum SpecType {
 fn string_to_control(s: &str) -> SpecType {
     match s {
         "C" => SpecType::CommandSpec,
+        "J" => SpecType::JunctionSpec,
         "B" => SpecType::BufferSpec,
         "S" => SpecType::SinkSpec,
         "T" => SpecType::TapSpec,
@@ -33,9 +32,10 @@ fn string_to_control(s: &str) -> SpecType {
     }
 }
 
-fn control_to_string(s: &SpecType) -> String {
+pub fn control_to_string(s: &SpecType) -> String {
     match s {
         SpecType::CommandSpec => "C".to_owned(),
+        SpecType::JunctionSpec => "J".to_owned(),
         SpecType::BufferSpec => "B".to_owned(),
         SpecType::SinkSpec => "S".to_owned(),
         SpecType::TapSpec => "T".to_owned(),
@@ -48,7 +48,7 @@ pub struct Destination {
     pub name: String,
 }
 
-#[derive(Debug, PartialEq, Clone, Eq, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct Source {
     pub spec_type: SpecType,
     pub name: String,
@@ -111,23 +111,17 @@ pub struct CommandDesire<LS>
 
 #[derive(Debug)]
 #[derive(PartialEq)]
-struct BufferPosition {
+struct JunctionPosition {
     src: Vec<Source>,
     dst: Vec<Destination>,
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
-struct IdentifyNonCommands {
-    taps: Vec<String>,
-    sinks: Vec<String>,
-    buffers: Vec<BufferPosition>,
-}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct JoinSpec {
     pub src: Source,
     pub dst: Destination,
+    pub priority: u32,
 }
 
 #[derive(Debug)]
@@ -161,6 +155,8 @@ impl <L> PartialOrd for CommandSpec<L> {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferSpec { pub name: String }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct JunctionSpec { pub name: String }
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SinkSpec { pub name: String }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TapSpec { pub name: String }
@@ -169,6 +165,7 @@ pub struct TapSpec { pub name: String }
 pub enum Builder<L> {
     JoinSpec(JoinSpec),
     CommandSpec(CommandSpec<L>),
+    JunctionSpec(JunctionSpec),
     BufferSpec(BufferSpec),
     SinkSpec(SinkSpec),
     TapSpec(TapSpec),
@@ -178,9 +175,10 @@ fn builder_enum_type_to_usize<L>(b: &Builder<L>) -> usize {
     match b {
         Builder::JoinSpec(_) => 1,
         Builder::CommandSpec(_) => 2,
-        Builder::BufferSpec(_) => 3,
-        Builder::SinkSpec(_) => 4,
-        Builder::TapSpec(_) => 5,
+        Builder::JunctionSpec(_) => 3,
+        Builder::BufferSpec(_) => 4,
+        Builder::SinkSpec(_) => 5,
+        Builder::TapSpec(_) => 6,
     }
 }
 
@@ -194,15 +192,14 @@ impl <L> Eq for Builder<L> { }
 
 impl <L> Ord for Builder<L> {
     fn cmp(&self, other: &Self) -> Ordering {
-        let s = builder_enum_type_to_usize(self);
-        let o = builder_enum_type_to_usize(other);
         match (self, other) {
             (Builder::JoinSpec(a), Builder::JoinSpec(b)) => { a.cmp(b) },
             (Builder::CommandSpec(a), Builder::CommandSpec(b)) => { a.cmp(b) },
             (Builder::BufferSpec(a), Builder::BufferSpec(b)) => { a.cmp(b) },
+            (Builder::JunctionSpec(a), Builder::JunctionSpec(b)) => { a.cmp(b) },
             (Builder::SinkSpec(a), Builder::SinkSpec(b)) => { a.cmp(b) },
             (Builder::TapSpec(a), Builder::TapSpec(b)) => { a.cmp(b) },
-            (a, b) => {
+            (_x, _y) => {
                 let (a, b) = (builder_enum_type_to_usize(self), builder_enum_type_to_usize(other));
                 if a < b {
                     return Ordering::Less;
@@ -222,7 +219,7 @@ impl <L> PartialOrd for Builder<L> {
 type NodeMap = HashMap<String, NodeIndex<u32>>;
 
 fn encode_destination_port(t: &Destination) -> String {
-    vec!["P".to_owned(), control_to_string(&t.spec_type), t.name.clone(), "IN".to_owned()].join("#")
+    vec!["P".to_owned(), control_to_string(&t.spec_type), t.name.clone(), "I".to_owned()].join("#")
 }
 
 fn encode_source_port(t: &Source) -> String {
@@ -245,8 +242,21 @@ fn source_to_destination(t: Source) -> Destination {
     }
 }
 
+fn decode_string_to_control(s: &str) -> Option<(SpecType, String)> {
+    match s.split("#").collect::<Vec<&str>>()[..] {
+        ["C", t, name] => Some((string_to_control(t), name.to_string())),
+        _ => None,
+    }
+}
+
 
 fn decode_string_to_source(s: &str) -> Option<Source> {
+
+    pub fn port_str_to_enum(s: &str) -> Port {
+        if s == "X" { return Port::EXIT; }
+        if s == "O" { Port::OUT } else { Port::ERR }
+    }
+
     match s.rsplit("#").collect::<Vec<&str>>()[..] {
         [port, name, control, _typ] => {
             Some(Source { spec_type: string_to_control(control), name: name.to_owned(), port: port_str_to_enum(&port) })
@@ -255,23 +265,158 @@ fn decode_string_to_source(s: &str) -> Option<Source> {
     }
 }
 
-type TheGraph = StableGraph::<String, u32, petgraph::Directed, u32>;
+pub type TheGraph = StableGraph::<String, u32, petgraph::Directed, u32>;
 
 #[derive(Debug)]
 pub struct Specification<L> {
     pub spec: BTreeSet<Builder<L>>,
     pub graph: TheGraph,
+    pub nodes: NodeMap,
+}
+
+
+fn find_graph_nodes(nodes: &NodeMap, st: SpecType)-> Vec<String> {
+    let mut r: Vec<String> = vec![];
+    for (k, _v) in nodes {
+        match decode_string_to_control(k) {
+            Some((t, _)) => {
+                if t == st {
+                    r.push(k.to_owned());
+                }
+            },
+            None => (),
+        }
+    }
+
+    r
+}
+
+fn patch_edge_weights_get_node_weight(graph: &TheGraph, nodes: &NodeMap, id: &str) -> Option<u32> {
+    let mut min: Option<u32> = None;
+    let edges = graph.edges_directed(nodes[id], Direction::Incoming);
+    for e in edges {
+        match (min, e.weight()) {
+            (None, si) => { min = Some(*si); }
+            (Some(m), &w) => {
+                if w < m {
+                    min = Some(w);
+                }
+            }
+        }
+    }
+    min
+}
+
+fn patch_edge_weights_patcher(graph: &mut TheGraph, nodes: &NodeMap, src: &str) {
+    let node_weight = patch_edge_weights_get_node_weight(&graph, &nodes, src);
+    let mut neighbors: Vec<String> = vec![];
+    for n in graph.neighbors_directed(nodes[src], Direction::Outgoing) {
+        neighbors.push(graph[n].clone());
+    }
+    for n in neighbors {
+        graph.update_edge(
+            nodes[src],
+            nodes[&n],
+            match node_weight {
+                None => 1,
+                Some(n) => n + 1,
+            }
+        );
+    }
+}
+
+fn patch_edge_weights_iter(mut graph: &mut TheGraph, nodes: &NodeMap, src: &str, complete: &mut BTreeSet<String>) {
+    patch_edge_weights_patcher(&mut graph, nodes, src);
+    let mut neighbors: Vec<String> = vec![];
+    for n in graph.neighbors_directed(nodes[src], Direction::Outgoing) {
+        if complete.contains(&graph[n]) {
+            continue;
+        }
+        neighbors.push(graph[n].clone());
+        complete.insert(graph[n].to_owned());
+    }
+    for n in neighbors {
+        patch_edge_weights_iter(graph, nodes, &n, complete);
+    }
+}
+
+fn patch_edge_weights(mut graph: &mut TheGraph, nodes: &NodeMap, src: &str) {
+    let mut bts = BTreeSet::new();
+    patch_edge_weights_iter(&mut graph, &nodes, src, &mut bts);
+}
+
+#[test]
+fn test_find_graph_nodes() {
+
+    fn get_test_spec(cmd: &str) -> NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>
+    {
+        NativeLaunchSpec::new(
+            HashMap::new() as HashMap<String, String>,
+            ".".to_owned(),
+            cmd.to_owned(),
+            vec!["s/^/ONE: /".to_owned()]
+        )
+    }
+
+    let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
+        CommandDesire {
+            src: vec![
+                Source { spec_type: SpecType::TapSpec, name: "TAP".to_owned(), port: Port::OUT },
+                Source { spec_type: SpecType::CommandSpec, name: "ADD_LEADING_ZERO".to_owned(), port: Port::OUT }
+            ],
+            spec: get_test_spec("sed"),
+            name: "INPUT".to_owned(),
+        },
+        CommandDesire {
+            src: vec![Source { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned(), port: Port::OUT }],
+            spec: get_test_spec("grep"),
+            name: "GOOD".to_owned(),
+        },
+        CommandDesire {
+            src: vec![Source { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned(), port: Port::OUT }],
+            spec: get_test_spec("grep"),
+            name: "BAD".to_owned(),
+        },
+        CommandDesire {
+            src: vec![ Source { spec_type: SpecType::CommandSpec, name: "BAD".to_owned(), port: Port::OUT } ],
+            spec: get_test_spec("grep"),
+            name: "ADD_LEADING_ZERO".to_owned(),
+        },
+    ];
+
+    let mut outputs: Outputs = BTreeMap::new();
+
+    outputs.insert("OUTPUT".to_owned(), vec![
+        Source { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned(), port: Port::OUT },
+    ]);
+
+    let mut spec = identify(lines, outputs);
+
+    fn get_weight(graph: &TheGraph, nodes: &NodeMap, src: &str, dst: &str) -> Option<u32> {
+        match graph.find_edge(nodes[src], nodes[dst]).map(|e| graph.edge_weight(e)).flatten() {
+            Some(w) => {
+                Some(*w)
+            },
+            None => {
+                None
+            }
+        }
+    }
+
+    assert_eq!(vec!["C#T#TAP".to_owned()], find_graph_nodes(&spec.nodes, SpecType::TapSpec));
+    assert_eq!(vec!["C#T#TAP".to_owned()], find_graph_nodes(&spec.nodes, SpecType::TapSpec));
+    assert_eq!(Some(1), get_weight(&spec.graph, &spec.nodes, "C#T#TAP", "P#T#TAP#O"));
+    assert_eq!(Some(1), patch_edge_weights_get_node_weight(&spec.graph, &spec.nodes, "P#T#TAP#O"));
+    patch_edge_weights_patcher(&mut spec.graph, &spec.nodes, "P#T#TAP#O");
+    patch_edge_weights(&mut spec.graph, &spec.nodes, "C#T#TAP");
+    println!("{}", Dot::new(&spec.graph));
+    assert_eq!(Some(2), get_weight(&spec.graph, &spec.nodes, "P#T#TAP#O", "P#J#JUNCTION_0_0#I"));
+    assert_eq!(Some(26), get_weight(&spec.graph, &spec.nodes, "P#C#ADD_LEADING_ZERO#O", "P#J#JUNCTION_0_0#I"));
+
 }
 
 fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<CommandDesire<L>>) -> BTreeSet<Builder<L>> {
 
-
-    fn decode_string_to_control(s: &str) -> Option<(SpecType, String)> {
-        match s.split("#").collect::<Vec<&str>>()[..] {
-            ["C", t, name] => Some((string_to_control(t), name.to_string())),
-            _ => None,
-        }
-    }
 
     fn get_command<L>(lines: &mut Vec<CommandDesire<L>>, s: &String) -> Option<Builder<L>> {
         match decode_string_to_control(s) {
@@ -284,7 +429,10 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
                         name: l.name,
                     })))
             },
-            Some((SpecType::BufferSpec, name)) => Some(Builder::BufferSpec(BufferSpec { name })),
+            Some((SpecType::BufferSpec, name)) => {
+                Some(Builder::BufferSpec(BufferSpec { name }))
+            },
+            Some((SpecType::JunctionSpec, name)) => Some(Builder::JunctionSpec(JunctionSpec { name })),
             Some((SpecType::SinkSpec, name)) => Some(Builder::SinkSpec(SinkSpec { name })),
             Some((SpecType::TapSpec, name)) => Some(Builder::TapSpec(TapSpec { name })),
             None => None,
@@ -313,11 +461,18 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
                 _ => (),
             }
 
+            let priority = match graph.find_edge(src, n).map(|e| graph.edge_weight(e)).flatten() {
+                Some(n) => *n,
+                None => 0,
+            };
+
             match (decode_string_to_source(&graph[src]), decode_string_to_source(&graph[n]).map(source_to_destination)) {
                 (Some(src_target), Some(dst_target)) => {
+
                     let join = Builder::JoinSpec(JoinSpec {
                         src: src_target,
                         dst: dst_target,
+                        priority,
                     });
                     tried = true;
                     added = r.insert(join) || added;
@@ -346,22 +501,10 @@ fn increment_id(id: &mut u32) -> u32 {
     *id
 }
 
-fn increment_port<K>(hm: &mut HashMap<K, usize>, k: K) where K: Eq + std::hash::Hash {
-    match hm.get_mut(&k) {
-        None => {
-            hm.insert(k, 1);
-        },
-        Some(n) => {
-            *n = *n + 1;
-        },
-    }
-}
 
+fn junction_spec_multi_out(graph: &TheGraph, nodes: &NodeMap, direction: Direction) -> Vec<JunctionPosition> {
 
-
-fn buffer_spec_multi_out(graph: &TheGraph, nodes: &NodeMap, direction: Direction) -> Vec<BufferPosition> {
-
-    fn get_multi_folder(graph: &TheGraph, mut acc: Vec<BufferPosition>, item: &NodeIndex<u32>, direction: Direction) -> Vec<BufferPosition> {
+    fn get_multi_folder(graph: &TheGraph, mut acc: Vec<JunctionPosition>, item: &NodeIndex<u32>, direction: Direction) -> Vec<JunctionPosition> {
 
         let mut dst: Vec<Source> = vec![];
         let mut out_count = 0;
@@ -385,8 +528,8 @@ fn buffer_spec_multi_out(graph: &TheGraph, nodes: &NodeMap, direction: Direction
         match decode_string_to_source(&graph[*item]) {
             Some(t) => {
                 acc.push(match direction {
-                    Direction::Outgoing => BufferPosition { src: vec![t], dst: dst.into_iter().map(source_to_destination).collect() },
-                    Direction::Incoming => BufferPosition { src: dst, dst: vec![source_to_destination(t)] },
+                    Direction::Outgoing => JunctionPosition { src: vec![t], dst: dst.into_iter().map(source_to_destination).collect() },
+                    Direction::Incoming => JunctionPosition { src: dst, dst: vec![source_to_destination(t)] },
                 });
                 acc
             },
@@ -449,29 +592,29 @@ fn get_control_node_from_destination(graph: &mut TheGraph, nodes: &mut NodeMap, 
     }
 }
 
-fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, buffer_positions: Vec<BufferPosition>, direction: usize, mut edge_id: &mut u32) {
-    for i in 0..buffer_positions.len() {
+fn add_junctions(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, junction_positions: Vec<JunctionPosition>, direction: usize, mut edge_id: &mut u32) {
+    for i in 0..junction_positions.len() {
 
-        let buffer_in = Destination {
-            spec_type: SpecType::BufferSpec,
-            name: format!("BUFFER_{}_{}", direction, i),
+        let junction_in = Destination {
+            spec_type: SpecType::JunctionSpec,
+            name: format!("JUNCTION_{}_{}", direction, i),
         };
 
-        let buffer_out = Source {
-            spec_type: SpecType::BufferSpec,
-            name: format!("BUFFER_{}_{}", direction, i),
+        let junction_out = Source {
+            spec_type: SpecType::JunctionSpec,
+            name: format!("JUNCTION_{}_{}", direction, i),
             port: Port::OUT
         };
 
-        let n_buf = get_control_node(&mut graph, &mut nodes, &buffer_out);
-        let n_buf_in = get_port_node_from_destination(&mut graph, &mut nodes, &buffer_in);
-        let n_buf_out = get_port_node(&mut graph, &mut nodes, &buffer_out);
+        let n_buf = get_control_node(&mut graph, &mut nodes, &junction_out);
+        let n_buf_in = get_port_node_from_destination(&mut graph, &mut nodes, &junction_in);
+        let n_buf_out = get_port_node(&mut graph, &mut nodes, &junction_out);
 
         graph.add_edge(n_buf_in, n_buf, increment_id(&mut edge_id));
         graph.add_edge(n_buf, n_buf_out, increment_id(&mut edge_id));
 
-        for d in &buffer_positions[i].dst {
-            for s in &buffer_positions[i].src {
+        for d in &junction_positions[i].dst {
+            for s in &junction_positions[i].src {
                 match (nodes.get(&encode_source_port(s)), nodes.get(&encode_destination_port(d))) {
                     (Some(sn), Some(dn)) => {
                         match graph.find_edge(*sn, *dn) {
@@ -492,6 +635,95 @@ fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, buffer_positio
                     _ => (),
                 }
             }
+        }
+    }
+}
+
+fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap) {
+
+    #[derive(Debug)]
+    #[derive(PartialEq)]
+    struct BufferPosition {
+        src: Source,
+        dst: Destination,
+    }
+
+    fn buffer_spec_multi_out(graph: &TheGraph, nodes: &NodeMap) -> Vec<BufferPosition> {
+
+        fn get_multi_folder(graph: &TheGraph, mut acc: Vec<BufferPosition>, item: &NodeIndex<u32>, direction: Direction) -> Vec<BufferPosition> {
+
+            let neighbors = graph.neighbors_directed(*item, direction);
+
+            match decode_string_to_source(&graph[*item]) {
+                Some(t) => {
+                    for neigh in neighbors {
+                        match decode_string_to_source(&graph[neigh]) {
+                            Some(d) => {
+                                if d.spec_type == SpecType::CommandSpec {
+                                    acc.push(
+                                        BufferPosition { src: t.clone(), dst: source_to_destination(d) },
+                                    );
+                                }
+                            },
+                            None => (),
+                        }
+                    }
+                }
+                None => (),
+            }
+
+            acc
+        }
+
+        nodes.into_iter().fold(
+            vec![],
+            |acc, (_node, node_index)| get_multi_folder(&graph, acc, node_index, Direction::Outgoing)
+        )
+    }
+
+    let buffer_positions = buffer_spec_multi_out(&graph, &nodes);
+
+    for i in 0..buffer_positions.len() {
+
+        let buffer_in = Destination {
+            spec_type: SpecType::BufferSpec,
+            name: format!("BUFFER_{}", i),
+        };
+
+        let buffer_out = Source {
+            spec_type: SpecType::BufferSpec,
+            name: format!("BUFFER_{}", i),
+            port: Port::OUT
+        };
+
+        let n_buf = get_control_node(&mut graph, &mut nodes, &buffer_out);
+        let n_buf_in = get_port_node_from_destination(&mut graph, &mut nodes, &buffer_in);
+        let n_buf_out = get_port_node(&mut graph, &mut nodes, &buffer_out);
+
+        let mut edge_id: u32 = 0;
+
+        graph.add_edge(n_buf_in, n_buf, increment_id(&mut edge_id));
+        graph.add_edge(n_buf, n_buf_out, increment_id(&mut edge_id));
+
+        match (nodes.get(&encode_source_port(&buffer_positions[i].src)), nodes.get(&encode_destination_port(&buffer_positions[i].dst))) {
+            (Some(sn), Some(dn)) => {
+                match graph.find_edge(*sn, *dn) {
+                    Some(e) => {
+                        graph.remove_edge(e);
+                        match graph.find_edge(*sn,n_buf_in) {
+                            None => { graph.add_edge(*sn, n_buf_in, increment_id(&mut edge_id)); }
+                            _ => (),
+                        }
+                        match graph.find_edge(n_buf_out, *dn) {
+                            None => { graph.add_edge(n_buf_out, *dn, increment_id(&mut edge_id)); }
+                            _ => (),
+                        }
+                    },
+                    None => {
+                    }
+                }
+            }
+            _ => (),
         }
     }
 }
@@ -552,22 +784,23 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Spec
     }
 
     add_sinks(&mut graph, &mut nodes, &mut edge_id, desired_sinks);
-    let buffer_spec_in = buffer_spec_multi_out(&graph, &nodes, Direction::Incoming);
-    add_buffers(&mut graph, &mut nodes, buffer_spec_in, 0, &mut edge_id);
-    let buffer_spec_out = buffer_spec_multi_out(&graph, &nodes, Direction::Outgoing);
-    add_buffers(&mut graph, &mut nodes, buffer_spec_out, 1, &mut edge_id);
+    let junction_spec_in = junction_spec_multi_out(&graph, &nodes, Direction::Incoming);
+    add_junctions(&mut graph, &mut nodes, junction_spec_in, 0, &mut edge_id);
+    let junction_spec_out = junction_spec_multi_out(&graph, &nodes, Direction::Outgoing);
+    add_junctions(&mut graph, &mut nodes, junction_spec_out, 1, &mut edge_id);
+    add_buffers(&mut graph, &mut nodes);
 
-    Specification {
-        // spec: get_builder_spec(&graph, &nodes, lines),
-        spec: get_builder_spec(&graph, &nodes, lines),
-        graph,
+    let taps = find_graph_nodes(&nodes, SpecType::TapSpec);
+    for tap in taps {
+        patch_edge_weights(&mut graph, &nodes, &tap);
     }
 
-    // IdentifyNonCommands {
-    //     taps: graph.externals(Direction::Incoming).map(|t| string_to_control_name(&graph[t])).collect(),
-    //     sinks: graph.externals(Direction::Outgoing).map(|t| string_to_control_name(&graph[t])).collect(),
-    //     buffers: vec![],
-    // }
+    Specification {
+        spec: get_builder_spec(&graph, &nodes, lines),
+        graph,
+        nodes,
+    }
+
 }
 
 #[derive(Debug, Deserialize, PartialEq, Clone, Eq, PartialOrd)]
@@ -631,10 +864,9 @@ pub struct JSONConfig {
     pub commands: Vec<JSONCommandDesire>,
 }
 
-fn find_taps(commands: &Vec<JSONCommandDesire>) -> BTreeSet<String> {
+pub fn find_taps(commands: &Vec<JSONCommandDesire>) -> BTreeSet<String> {
         let mut found_sources: BTreeSet<&str> = BTreeSet::new();
         let mut found_commands: BTreeSet<&str> = BTreeSet::new();
-        let mut r: BTreeSet<String> = BTreeSet::new();
         for i in 0..commands.len() {
             found_commands.insert(&commands[i].name);
             for j in 0..commands[i].src.len() {
@@ -765,28 +997,31 @@ fn test_identify() {
         Source { spec_type: SpecType::CommandSpec, name: "A".to_owned(), port: Port::OUT },
     ]);
 
-    let result = identify(lines, outputs);
-
     let mut expected: BTreeSet<Builder<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = BTreeSet::new();
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "A".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "B".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "B".to_owned(), port: Port::ERR }, dst: Destination { spec_type: SpecType::SinkSpec, name: "B_ERRORS".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "OUTPUT".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "A_PURE".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "B".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned(), } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::TapSpec, name: "TAP".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "A".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "A".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "B".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "B".to_owned(), port: Port::ERR }, dst: Destination { spec_type: SpecType::SinkSpec, name: "B_ERRORS".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "OUTPUT".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "A_PURE".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "B".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::TapSpec, name: "TAP".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_1".to_owned(), } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "TAP".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "A".to_owned(), } }));
 
     expected.insert(Builder::CommandSpec(CommandSpec { name: "A".to_owned(), spec: get_test_spec("sed") }));
     expected.insert(Builder::CommandSpec(CommandSpec { name: "B".to_owned(), spec: get_test_spec("grep") }));
 
-    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_0_0".to_owned() }));
-    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_1_0".to_owned() }));
+    expected.insert(Builder::JunctionSpec(JunctionSpec { name: "JUNCTION_0_0".to_owned() }));
+    expected.insert(Builder::JunctionSpec(JunctionSpec { name: "JUNCTION_1_0".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_1".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_0".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "A_PURE".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "B_ERRORS".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
     expected.insert(Builder::TapSpec(TapSpec { name: "TAP".to_owned() }));
 
+    let result = identify(lines, outputs);
 
     println!("{}", Dot::new(&result.graph));
     assert_eq!(expected, result.spec);
@@ -855,14 +1090,18 @@ fn test_identify_loop() {
 
     let mut expected: BTreeSet<Builder<JSONLaunchSpec>> = BTreeSet::new();
 
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::TapSpec, name: "FAUCET".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "BAD".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "BAD".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "ADD_LEADING_ZERO".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "ADD_LEADING_ZERO".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0_0".to_owned() } }));
-    expected.insert(Builder::JoinSpec(JoinSpec { src: Source { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "OUTPUT".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::TapSpec, name: "FAUCET".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "INPUT".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_1".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::JunctionSpec, name: "JUNCTION_1_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_2".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_2".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "BAD".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "BAD".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_3".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_3".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "ADD_LEADING_ZERO".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "ADD_LEADING_ZERO".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::JunctionSpec, name: "JUNCTION_0_0".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 1, src: Source { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::SinkSpec, name: "OUTPUT".to_owned() } }));
 
     expected.insert(Builder::CommandSpec(CommandSpec { name: "INPUT".to_owned(), spec: JSONLaunchSpec {
         command: "cat".to_owned(),
@@ -889,13 +1128,17 @@ fn test_identify_loop() {
         args: Some(vec!["s/^/0/".to_owned()])
     } }));
 
-    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_0_0".to_owned() }));
-    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_1_0".to_owned() }));
+    expected.insert(Builder::JunctionSpec(JunctionSpec { name: "JUNCTION_0_0".to_owned() }));
+    expected.insert(Builder::JunctionSpec(JunctionSpec { name: "JUNCTION_1_0".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_0".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_1".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_2".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_3".to_owned() }));
     expected.insert(Builder::TapSpec(TapSpec { name: "FAUCET".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
 
-    println!("{}", Dot::new(&result.graph));
+    // println!("{}", Dot::new(&result.graph));
 
     assert_eq!(expected, result.spec);
 

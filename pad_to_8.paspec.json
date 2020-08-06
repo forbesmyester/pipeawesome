@@ -16,7 +16,7 @@
         { "name": "INPUT", "port": "OUT" },
         { "name": "ADD_LEADING_ZERO", "port": "OUT" }
       ],
-      "spec": { "command": "grep", "args": [ "--line-buffered", "^.\\{4\\}\\:" ] }
+      "spec": { "command": "grep", "args": [ "--line-buffered", ".\\{6\\}\\:" ] }
     },
     {
       "name": "BAD",
@@ -24,7 +24,7 @@
         { "name": "INPUT", "port": "OUT" },
         { "name": "ADD_LEADING_ZERO", "port": "OUT" }
       ],
-      "spec": { "command": "grep", "args": [ "--line-buffered", "-v", "^.\\{4\\}\\:" ] }
+      "spec": { "command": "grep", "args": [ "--line-buffered", "-v", ".\\{6\\}\\:" ] }
     },
     {
       "name": "ADD_LEADING_ZERO",

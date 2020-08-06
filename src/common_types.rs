@@ -3,6 +3,7 @@ use serde::Deserialize;
 pub enum Port {
     OUT,
     ERR,
+    EXIT,
 }
 
 
@@ -11,11 +12,8 @@ impl std::fmt::Display for Port {
         match self {
             Port::OUT => write!(f, "O"),
             Port::ERR => write!(f, "E"),
+            Port::EXIT => write!(f, "X"),
         }
     }
-}
-
-pub fn port_str_to_enum(s: &str) -> Port {
-    if s == "O" { Port::OUT } else { Port::ERR }
 }
 
