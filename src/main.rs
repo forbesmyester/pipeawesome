@@ -110,16 +110,20 @@ impl Accounting {
 
     fn get_pipe_size(pipe_size: &PipeSizeHash, ci: &ControlInput) -> usize {
 
-        let m = pipe_size.get(&ci.0).and_then(|hm| hm.get(&ci.1)).and_then(|v| v.get(ci.2));
+        let c2: usize = ((-1 as isize) - ci.2) as usize;
+        let m = pipe_size.get(&ci.0).and_then(|hm| hm.get(&ci.1)).and_then(|v| v.get(c2));
 
         match m {
             Some(n) => *n,
-            None => 0
+            None => 0,
         }
 
     }
 
     fn set_pipe_size(mut pipe_size: &mut PipeSizeHash, ci: &ControlInput, size: usize) {
+        if ci.2 > -1 {
+            return;
+        }
 
         fn ensure_its_there<K: std::hash::Hash + Eq + Clone, V>(hm: &mut HashMap<K, V>, k: K, default_if_not_there: V) {
 
@@ -143,10 +147,10 @@ impl Accounting {
 
         match l2.get_mut(&ci.1) {
             Some(v) => {
-                while v.len() <= ci.2 {
+                while v.len() <= (-1 - ci.2) as usize {
                     v.push(0);
                 }
-                v[ci.2] = size;
+                v[(-1 - ci.2) as usize] = size;
             }
             None => panic!("Accounting::set_pipe_size - get_mut after insert failed (2)"),
         }
@@ -282,16 +286,16 @@ impl Accounting {
 fn test_accounting_buffers() {
 
     let mut accounting = Accounting::new(5, 4, 3);
-    accounting.add_join(ControlInput(SpecType::TapSpec, "TAP1".to_owned(), 1), ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 0));
-    accounting.add_join(ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 1), ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), 0));
+    accounting.add_join(ControlInput(SpecType::TapSpec, "TAP1".to_owned(), 0), ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), -1));
+    accounting.add_join(ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 0), ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), -1));
 
     let mut tap1_ps = ProcessStatus::new();
     let mut buf1_ps = ProcessStatus::new();
     let mut cmd1_ps = ProcessStatus::new();
-    tap1_ps.add_to_wrote_to(vec![1; 9].into_iter());
-    buf1_ps.add_to_read_from(vec![0; 7].into_iter());
-    buf1_ps.add_to_wrote_to(vec![1; 3].into_iter());
-    cmd1_ps.add_to_read_from(vec![0].into_iter());
+    tap1_ps.add_to_wrote_to(vec![0; 9].into_iter());
+    buf1_ps.add_to_read_from(vec![-1; 7].into_iter());
+    buf1_ps.add_to_wrote_to(vec![0; 3].into_iter());
+    cmd1_ps.add_to_read_from(vec![-1].into_iter());
 
 
     accounting.update(SpecType::TapSpec, "TAP1".to_owned(), tap1_ps);
@@ -1172,7 +1176,7 @@ fn main() {
         let mut loop_number: usize = 0;
         let debug: bool = true;
 
-        print!("CSV: {}", accounting.debug_header());
+        // print!("CSV: {}", accounting.debug_header());
         loop {
             loop_number = loop_number + 1;
 
@@ -1181,9 +1185,9 @@ fn main() {
                 let process_result = proc.process();
                 // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
                 // println!("AC: {:?}", accounting);
-                // for line in accounting.update(spec_type.to_owned(), name.to_string(), process_result) {
-                //     print!("CSV: {}", line);
-                // }
+                for line in accounting.update(spec_type.to_owned(), name.to_string(), process_result) {
+                    // print!("CSV: {}", line);
+                }
             }
 
             // if debug && ((loop_number % 10000) == 0) {
