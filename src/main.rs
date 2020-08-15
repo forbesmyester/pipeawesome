@@ -4,6 +4,7 @@ mod config;
 #[path = "common_types.rs"]
 mod common_types;
 
+use std::collections::HashSet;
 use petgraph::stable_graph::{ StableGraph, NodeIndex };
 use petgraph::{ Direction };
 use petgraph::dot::Dot;
@@ -12,6 +13,7 @@ use clap::{Arg as ClapArg, App as ClapApp};
 
 use csv::Writer;
 
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::convert::TryFrom;
 use std::path::Path;
 use std::collections::BTreeSet;
@@ -23,12 +25,18 @@ use self::controls::*;
 use self::config::*;
 use self::common_types::Port;
 
-const CHANNEL_SIZE: usize = 8192;
-
+const CHANNEL_SIZE: usize = 16;
+const CHANNEL_LOW_WATERMARK: usize = 4;
+const CHANNEL_HIGH_WATERMARK: usize = 8;
 
 type ControlId = String;
 #[derive(Hash, Debug, Clone)]
 pub struct ControlInput(pub SpecType, pub ControlId, pub ConnectionId);
+impl ControlInput {
+    fn to_tuple(&self) -> (SpecType, ControlId, ConnectionId) {
+        (self.0, self.1.to_owned(), self.2)
+    }
+}
 #[derive(Debug)]
 pub struct AccountingMsg(SpecType, ControlId, ProcessStatus);
 
@@ -49,45 +57,94 @@ impl Eq for ControlInput {}
 
 type PipeSizeHash = HashMap<SpecType, HashMap<ControlId, Vec<usize>>>;
 
-#[derive(Debug)]
-struct Accounting {
-    controls: Vec<ControlInput>,
-    channel_size: usize,
-    channel_high_watermark: usize,
-    channel_low_watermark: usize,
-    sources: HashMap<ControlInput, ControlInput>,
-    destinations: HashMap<ControlInput, ControlInput>,
-    pipe_size: PipeSizeHash,
-    enter: HashMap<ControlInput, usize>,
-    leave: HashMap<ControlInput, usize>,
-    finished: BTreeSet<ControlId>,
-}
-
 #[derive(PartialEq, Debug)]
 enum AccountingOperation {
     Addition,
     Subtraction,
 }
 
-#[derive(PartialEq, Eq, PartialOrd)]
-enum HungerLevel {
-    Full = 0,
-    Stuffed = 1,
-    Satisfied = 2,
-    Hungry = 3,
-    Starved = 4,
+type CsvLine = String;
+
+#[derive(Debug)]
+struct Failed (Option<Instant>, HashSet<(SpecType, ControlId)>, u128);
+
+impl Failed {
+    fn till_clear(&self) -> Duration {
+        match self.0 {
+            Some(inst) => {
+                if Instant::now().duration_since(inst).as_millis() > self.2 {
+                    return Duration::from_millis(0)
+                }
+                let clear_inst = match u64::try_from(self.2).ok() {
+                    Some(n) => Instant::now() + Duration::from_millis(n),
+                    None => panic!("The clear time for fail log is too long (>u64)"),
+                };
+                clear_inst.duration_since(inst)
+            }
+            None => Duration::from_millis(0)
+        }
+    }
+    fn clear(&mut self) {
+        self.0 = None;
+        self.1.clear()
+    }
+    fn contains(&self, x: &(SpecType, ControlId)) -> bool {
+        match self.0 {
+            Some(inst) => {
+                if Instant::now().duration_since(inst).as_millis() > self.2 {
+                    return false;
+                }
+                self.1.contains(x)
+            }
+            None => false,
+        }
+    }
+    fn insert(&mut self, k: (SpecType, ControlId)) -> bool {
+        match self.0 {
+            Some(inst) => {
+                if Instant::now().duration_since(inst).as_millis() > self.2 {
+                    self.0 = Some(Instant::now());
+                    self.1.clear();
+                }
+            }
+            None => {
+                self.0 = Some(Instant::now());
+            },
+        }
+        self.1.insert(k)
+    }
+    fn new(fail_clear_millis: u128) -> Failed {
+        Failed (None, HashSet::new(), fail_clear_millis)
+    }
 }
 
-struct AccountingReturn {
-    csv_lines: Vec<String>,
-    outbound_ports: Vec<(HungerLevel, usize)>,
-    inbound_ports: Vec<(HungerLevel, usize)>,
-    hunger_level: HungerLevel,
+#[derive(Debug, PartialEq)]
+struct AccountingStatus {
+    process_status: ProcessStatus,
+    spec_type: SpecType,
+    control_id: ControlId,
+    outbound_ports: Vec<usize>,
+    inbound_ports: Vec<usize>,
 }
 
-impl Accounting {
-    fn new(channel_size: usize, channel_high_watermark: usize, channel_low_watermark: usize) -> Accounting {
-        Accounting {
+#[derive(Debug)]
+struct AccountingBuilder {
+    controls: Vec<ControlInput>,
+    channel_size: usize,
+    channel_high_watermark: usize,
+    channel_low_watermark: usize,
+    sources: HashMap<(SpecType, ControlId), Vec<Option<ControlInput>>>,
+    destinations: HashMap<(SpecType, ControlId), Vec<Option<ControlInput>>>,
+    pipe_size: PipeSizeHash,
+    enter: HashMap<ControlInput, usize>,
+    leave: HashMap<ControlInput, usize>,
+    finished: BTreeSet<ControlId>,
+}
+
+
+impl AccountingBuilder {
+    fn new(channel_size: usize, channel_high_watermark: usize, channel_low_watermark: usize) -> AccountingBuilder {
+        AccountingBuilder {
             controls: vec![],
             channel_size,
             channel_high_watermark,
@@ -101,6 +158,132 @@ impl Accounting {
         }
     }
 
+    fn add_join(&mut self, src: ControlInput, dst: ControlInput) {
+
+        println!("J: {:?} {:?}", src, dst);
+        Accounting::set_pipe_size(&mut self.pipe_size, &dst, 0);
+        let (src_spec_type, src_control_id, src_connection_id) = src.to_tuple();
+        let (dst_spec_type, dst_control_id, dst_connection_id) = dst.to_tuple();
+
+        fn resize(v: &mut Vec<Option<ControlInput>>, index: usize, value: ControlInput) {
+            while v.len() <= index {
+                v.push(None)
+            }
+            println!("V: {:?} [{}] = {:?}", v, index, value);
+            v[index] = Some(value);
+            println!("Vv: {:?} [{}]", v, index);
+        }
+
+        let index = Accounting::outbound_connection_id_to_vec_index(src_connection_id);
+        match self.destinations.get_mut(&(src_spec_type, src_control_id.clone())) {
+            Some(mut v) => {
+                resize(&mut v, index, dst.clone());
+            }
+            None => {
+                let mut v = vec![];
+                resize(&mut v, index, dst.clone());
+                self.destinations.insert((src_spec_type, src_control_id), v);
+            }
+        }
+
+        match self.sources.get_mut(&(dst_spec_type, dst_control_id.clone())) {
+            Some(mut v) => {
+                resize(&mut v, dst_connection_id as usize, src.clone());
+            }
+            None => {
+                let mut v = vec![];
+                resize(&mut v, dst_connection_id as usize, src.clone());
+                self.sources.insert((dst_spec_type, dst_control_id), v);
+            }
+        }
+
+        if !self.controls.contains(&src) { self.controls.push(src); }
+        if !self.controls.contains(&dst) { self.controls.push(dst); }
+    }
+
+    fn build(self) -> Accounting {
+
+        fn extract(hm: HashMap<(SpecType, ControlId), Vec<Option<ControlInput>>>) -> HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>> {
+            let mut r: HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>> = HashMap::new();
+            for ((k1, k2), vs) in hm {
+                let new_vs: Vec<ControlInput> = vs.into_iter().fold(
+                    vec![],
+                    |mut acc, ov| {
+                        match ov {
+                            None => acc,
+                            Some(v) => {
+                                acc.push(v);
+                                acc
+                            }
+                        }
+                    }
+                );
+                let mut inner_hm = match r.remove(&k1) {
+                    None => HashMap::new(),
+                    Some(inner) => inner,
+                };
+                inner_hm.insert(k2, new_vs);
+                r.insert(k1, inner_hm);
+            }
+            r
+        }
+
+        Accounting {
+            fail_count: 0,
+            total_size: 0,
+            controls: self.controls,
+            channel_size: self.channel_size,
+            channel_high_watermark: self.channel_high_watermark,
+            channel_low_watermark: self.channel_low_watermark,
+            sources: extract(self.sources),
+            destinations: extract(self.destinations),
+            pipe_size: self.pipe_size,
+            enter: self.enter,
+            leave: self.leave,
+            finished: self.finished,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Accounting {
+    fail_count: usize,
+    total_size: usize,
+    controls: Vec<ControlInput>,
+    channel_size: usize,
+    channel_high_watermark: usize,
+    channel_low_watermark: usize,
+    sources: HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>>,
+    destinations: HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>>,
+    pipe_size: PipeSizeHash,
+    enter: HashMap<ControlInput, usize>,
+    leave: HashMap<ControlInput, usize>,
+    finished: BTreeSet<ControlId>,
+}
+
+type Quantity = usize;
+type BufferQuantity = usize;
+type FailureCount = usize;
+
+enum QueueElement {
+    Finished(ControlInput),
+    Source(ControlInput, Instant),
+    Stopped(ControlInput, Quantity, BufferQuantity, FailureCount, Instant),
+    Available(ControlInput, Quantity, BufferQuantity, Instant),
+}
+
+
+struct AmountInChannel(usize);
+
+impl Accounting {
+
+    fn update_total_stats(total: &mut usize, entering: bool, count: &usize) {
+        match entering {
+            true => { *total = *total + count; },
+            false => { *total = *total - count; },
+        }
+    }
+
     fn update_stats(e_or_l: &mut HashMap<ControlInput, usize>, control_input: &ControlInput, count: &usize) {
         match e_or_l.get_mut(control_input) {
             None => { e_or_l.insert(control_input.to_owned(), *count); },
@@ -108,10 +291,16 @@ impl Accounting {
         }
     }
 
+    fn get_pipe_sizes<'a>(pipe_size: &'a PipeSizeHash, st: &SpecType, ci: &ControlId) -> Option<&'a Vec<usize>> {
+
+        pipe_size.get(st).and_then(|hm| hm.get(ci))
+
+    }
+
     fn get_pipe_size(pipe_size: &PipeSizeHash, ci: &ControlInput) -> usize {
 
-        let c2: usize = ((-1 as isize) - ci.2) as usize;
-        let m = pipe_size.get(&ci.0).and_then(|hm| hm.get(&ci.1)).and_then(|v| v.get(c2));
+        // let c2: usize = ((-1 as isize) - ci.2) as usize;
+        let m = Accounting::get_pipe_sizes(pipe_size, &ci.0, &ci.1).and_then(|v| v.get(ci.2 as usize));
 
         match m {
             Some(n) => *n,
@@ -121,9 +310,6 @@ impl Accounting {
     }
 
     fn set_pipe_size(mut pipe_size: &mut PipeSizeHash, ci: &ControlInput, size: usize) {
-        if ci.2 > -1 {
-            return;
-        }
 
         fn ensure_its_there<K: std::hash::Hash + Eq + Clone, V>(hm: &mut HashMap<K, V>, k: K, default_if_not_there: V) {
 
@@ -147,17 +333,17 @@ impl Accounting {
 
         match l2.get_mut(&ci.1) {
             Some(v) => {
-                while v.len() <= (-1 - ci.2) as usize {
+                while v.len() <= ci.2 as usize {
                     v.push(0);
                 }
-                v[(-1 - ci.2) as usize] = size;
+                v[ci.2 as usize] = size;
             }
             None => panic!("Accounting::set_pipe_size - get_mut after insert failed (2)"),
         }
 
     }
 
-    fn update_pipe_size<'a>(mut pipe_size: &mut PipeSizeHash, control_input: &'a ControlInput, count: &usize, operation: AccountingOperation) -> Result<(), &'a ControlInput> {
+    fn update_pipe_size<'a>(mut pipe_size: &mut PipeSizeHash, control_input: &'a ControlInput, count: &usize, operation: AccountingOperation) -> Result<usize, &'a ControlInput> {
 
         let get_count = |n: usize| {
             if operation == AccountingOperation::Addition {
@@ -171,24 +357,39 @@ impl Accounting {
             }
         };
 
-        match get_count(Accounting::get_pipe_size(&pipe_size, control_input)) {
+        let new_size = get_count(Accounting::get_pipe_size(&pipe_size, control_input));
+        match new_size {
             None => {
                 Err(control_input)
             },
-            Some(new_value) => {
-                Accounting::set_pipe_size(&mut pipe_size, control_input, new_value);
-                Ok(())
+            Some(current_size) => {
+                Accounting::set_pipe_size(&mut pipe_size, control_input, current_size);
+                Ok(current_size)
             },
         }
 
     }
 
-    fn add_join(&mut self, src: ControlInput, dst: ControlInput) {
-        Accounting::set_pipe_size(&mut self.pipe_size, &dst, 0);
-        self.destinations.insert(src.clone(), dst.clone());
-        self.sources.insert(dst.clone(), src.clone());
-        if !self.controls.contains(&src) { self.controls.push(src); }
-        if !self.controls.contains(&dst) { self.controls.push(dst); }
+    fn outbound_connection_id_to_vec_index(outbound_connection_id: ConnectionId) -> usize {
+        if outbound_connection_id > -1 {
+            panic!(
+                "outbound_connection_id_to_vec_index: You passed a positive number ({}), this must not be an outbound connection_id!",
+                outbound_connection_id
+            );
+        }
+        (0 - (outbound_connection_id + 1)) as usize
+    }
+
+    fn get_destination(&self, src_spec_type: &SpecType, src_control_id: &ControlId, src_connection_id: &ConnectionId) -> Option<ControlInput> {
+        let index = Accounting::outbound_connection_id_to_vec_index(*src_connection_id);
+        let x = match self.destinations.get(&src_spec_type).and_then(|h| h.get(src_control_id)) {
+            Some(v) => v.get(index),
+            None => None,
+        };
+        match x {
+            None => None,
+            Some(ci) => Some(ci.to_owned())
+        }
     }
 
     fn out_as_csv_line(out: &Vec<String>) -> Result<String, Box<dyn std::error::Error>> {
@@ -198,7 +399,10 @@ impl Accounting {
     }
 
     fn debug_header(&self) -> String {
-        let out: Vec<String> = self.controls.iter().map(|c| format!("{:?}", c)).collect();
+        let mut out: Vec<String> = Vec::with_capacity(self.controls.len());
+        for c in self.controls.iter() {
+            out.push(format!("{:?}", c));
+        }
         match Accounting::out_as_csv_line(&out) {
             Ok(s) => {
                 s
@@ -231,32 +435,98 @@ impl Accounting {
         }
     }
 
-    fn update(&mut self, spec_type: SpecType, control_id: ControlId, ps: ProcessStatus) -> Vec<String> {
-        let mut r: Vec<String> = vec![];
+    fn get_taps(&self) -> Vec<(SpecType, ControlId)> {
+        let mut r: Vec<(SpecType, ControlId)> = vec![];
+        for control in &self.controls {
+            let (spec_type, control_id, _port) = control.to_tuple();
+            if spec_type == SpecType::TapSpec {
+                r.push((spec_type, control_id));
+            }
+        }
+        r
+        // match self.pipe_size.get(&SpecType::TapSpec) {
+        //     None => vec![],
+        //     Some(hm) => {
+        //         hm.iter()
+        //             .map(|(k, _v)| (SpecType::TapSpec, k.to_owned()))
+        //             .collect()
+        //     },
+        // }
+    }
+
+    fn read_most_from(pr: &ProcessStatus) -> Option<(ConnectionId, usize)> {
+        pr.read_from.iter()
+            .fold(None, |acc, (conn_id, quant)| {
+                match acc {
+                    None => Some((*conn_id, *quant)),
+                    Some((_, acc_quant)) if quant > &acc_quant => {
+                        Some((*conn_id, *quant))
+                    }
+                    _ => acc
+                }
+            })
+    }
+
+    fn get_accounting_status(&self, spec_type: &SpecType, control_id: &ControlId, process_status: ProcessStatus) -> AccountingStatus {
+
+
+        let destinations = self.destinations.get(spec_type).and_then(|h| h.get(control_id));
+        let outbound_ports = match destinations {
+            Some(destinations) => {
+                let mut sizes: Vec<usize> = Vec::with_capacity(destinations.len());
+                for ci in destinations {
+                    sizes.push(Accounting::get_pipe_size(&self.pipe_size, ci));
+                }
+                sizes
+            },
+            None => vec![]
+        };
+
+
+        AccountingStatus {
+            process_status,
+            spec_type: *spec_type,
+            control_id: control_id.to_owned(),
+            outbound_ports,
+            inbound_ports: match Accounting::get_pipe_sizes(&self.pipe_size, spec_type, control_id) {
+                Some(v) => v.to_owned(),
+                None => vec![],
+            }
+        }
+
+    }
+
+
+
+    fn update(&mut self, spec_type: SpecType, control_id: ControlId, ps: &ProcessStatus) -> Vec<CsvLine> {
+
+        let mut csv_lines = Vec::with_capacity(ps.wrote_to.len() + ps.read_from.len());
+
         for (connection_id, count) in ps.wrote_to.iter() {
             let control = ControlInput(spec_type, control_id.to_owned(), *connection_id);
-            r.push(self.debug_line(&control, count, AccountingOperation::Addition));
+            csv_lines.push(self.debug_line(&control, count, AccountingOperation::Addition));
             Accounting::update_stats(&mut self.leave, &control, count);
-            match self.destinations.get(&control) {
+            Accounting::update_total_stats(&mut self.total_size, true, count);
+            match self.get_destination(&spec_type, &control_id, connection_id) {
                 Some(dst) => {
-                    Accounting::update_pipe_size(
+                    let new_size = Accounting::update_pipe_size(
                         &mut self.pipe_size,
                         &dst,
                         count,
                         AccountingOperation::Addition
-                    );
+                    ).expect("Negative encountered during update_pipe_size: addition!)");
                 },
                 None => {
-                    panic!("Accounting should have had a destination for {:?}, but did not", &control);
+                    panic!("Accounting should have had a destination for {:?}, but did not\n\n{:?}", &control, self.destinations);
                 }
-            }
+            };
         }
         for (connection_id, count) in ps.read_from.iter() {
             let control = ControlInput(spec_type, control_id.to_owned(), *connection_id);
-            r.push(self.debug_line(&control, count, AccountingOperation::Subtraction));
+            csv_lines.push(self.debug_line(&control, count, AccountingOperation::Subtraction));
             Accounting::update_stats(&mut self.enter, &control, count);
-            let r = Accounting::update_pipe_size(&mut self.pipe_size, &control, count, AccountingOperation::Subtraction);
-            match r {
+            Accounting::update_total_stats(&mut self.total_size, false, count);
+            match Accounting::update_pipe_size(&mut self.pipe_size, &control, count, AccountingOperation::Subtraction) {
                 Err(control_input) => {
                     panic!(
                         "Negative encountered during update_pipe_size: subraction(\n  pipe_size={:?},\n  control_input={:?},\n  count={:?}, process_status={:?})",
@@ -271,36 +541,334 @@ impl Accounting {
         }
         match ps.stopped_by {
             StoppedBy::ExhaustedInput => {
-                self.finished.insert(control_id);
+                self.finished.insert(control_id.to_owned());
             }
             _ => (),
         }
 
+
+        csv_lines
+
+    }
+
+    fn get_nexts(&self, spec_type: SpecType, control_id: ControlId) -> Vec<(SpecType, ControlId)> {
+
+        match spec_type {
+            SpecType::CommandSpec => vec![],
+            SpecType::SinkSpec => vec![],
+            _ => {
+                self.destinations.get(&spec_type).and_then(|hm| hm.get(&control_id))
+                    .and_then(|vs| {
+                        Some(vs.iter()
+                            .map(|v| {
+                                (v.0, v.1.to_owned())
+                            })
+                            .collect())
+                    })
+                    .unwrap_or(vec![])
+            }
+        }
+
+    }
+
+    fn update_failed(spec_type: &SpecType, control_id: &ControlId, process_status: &ProcessStatus, failed: &mut Failed) {
+        match (process_status.read_from.len() > 0) || (process_status.wrote_to.len() > 0) {
+            true => {
+                failed.clear();
+            },
+            false => {
+                // println!("FAIL_ADD: {:?}: {:?}: {:?}", &spec_type, &control_id, &process_status);
+                failed.insert((*spec_type, control_id.to_owned()));
+            },
+        }
+    }
+
+    fn list_controls(&self) -> Vec<(SpecType, ControlId)> {
+        let mut r: Vec<(SpecType, ControlId)> = self.get_taps();
+        for (spec_type, hm) in &self.sources {
+            for (control_id, _v) in hm {
+                r.push((*spec_type, control_id.to_owned()))
+            }
+        }
         r
     }
 
+    fn get_recommendation_fail(&mut self, failed: &Failed) -> Option<(ProcessCount, SpecType, ControlId)> {
+
+        self.fail_count = self.fail_count + 1;
+
+        let approx_desired_size = (self.leave.len() + 1) * (
+            (self.channel_high_watermark - self.channel_low_watermark / 2) +
+            self.channel_low_watermark
+        );
+
+        let mut taps = self.get_taps();
+
+        if self.total_size < approx_desired_size {
+            let tap = taps.remove(self.fail_count % taps.len());
+            if !failed.contains(&(tap.0, tap.1.clone())) {
+                return Some((
+                    self.channel_high_watermark - self.channel_low_watermark,
+                    tap.0,
+                    tap.1
+                ));
+            }
+        }
+
+        for control in self.list_controls().iter().rev() {
+            if !failed.contains(control) {
+                return Some((
+                    self.channel_high_watermark - self.channel_low_watermark,
+                    control.0,
+                    control.1.to_owned()
+                ));
+            }
+        }
+
+        None
+    }
+
+    fn get_recommendation_normal(&self, status: AccountingStatus, failed: &Failed) -> Option<(ProcessCount, SpecType, ControlId)> {
+
+        let get_src_index_to_run = |vs: &Vec<usize>, desired: Ordering| {
+            let mut r: Option<(usize, usize)> = None;
+            for i in 0..vs.len() {
+                match r {
+                    None => {
+                        r = Some((vs[i], i));
+                    },
+                    Some((other_hunger, _other_i)) => {
+                        if vs[i].cmp(&other_hunger) == desired {
+                            r = Some((vs[i], i));
+                        }
+                    },
+                }
+            }
+
+            r
+        };
+
+        let ret_from_vec = |quantity: usize, port: usize, hm: &HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>>| {
+
+            let hm = hm.get(&status.spec_type).and_then(|hm| hm.get(&status.control_id))
+                .and_then(|v| v.get(port));
+
+            match hm {
+                Some(dst) => {
+                    let three = dst.to_tuple();
+                    Some((quantity, three.0, three.1))
+                }
+                _ => None
+            }
+        };
+
+        let inbound = match Accounting::read_most_from(&status.process_status) {
+            None => get_src_index_to_run(&status.inbound_ports, Ordering::Greater),
+            Some((port, quant)) => {
+                Some((quant, port as usize))
+            },
+        };
+        let outbound = get_src_index_to_run(&status.outbound_ports, Ordering::Greater);
+
+        let not_me = |st: &SpecType, ci: &ControlId| {
+            !failed.contains(&(*st, ci.to_owned()))
+        };
+
+        let try_ret_from_vec = |quantity: usize, port: usize, hm: &HashMap<SpecType, HashMap<ControlId, Vec<ControlInput>>>| {
+            ret_from_vec(quantity, port, hm).and_then(|rfv| {
+                let (quantity, spec_type, control_id) = rfv;
+                match not_me(&spec_type, &control_id) {
+                    true => Some((quantity, spec_type, control_id)),
+                    false => None,
+                }
+            })
+        };
+
+        match (inbound, outbound) {
+
+            // NONE -> HERE(TAP) -->
+            (None, Some((out_fill, out_port)))
+                if (out_fill < self.channel_high_watermark) && not_me(&status.spec_type, &status.control_id) => {
+                    // println!("CHOICE: 1");
+                    Some((self.channel_size - out_fill, status.spec_type, status.control_id))
+                },
+            (None, Some((_, out_port))) => {
+                // println!("CHOICE: 2");
+                try_ret_from_vec(self.channel_high_watermark - self.channel_low_watermark, out_port, &self.destinations)
+            },
+
+            // ??? -> HERE(SINK) -> None
+            (Some((in_fill, in_port)), None) if (in_fill > self.channel_high_watermark) && not_me(&status.spec_type, &status.control_id) => {
+                // println!("CHOICE: 3");
+                Some((in_fill - self.channel_high_watermark, status.spec_type, status.control_id))
+            }
+            // (Some((in_fill, in_port)), None) if (in_fill > 0) && not_me(&status.spec_type, &status.control_id) => {
+            //     println!("CHOICE: 3");
+            //     Some((in_fill, status.spec_type, status.control_id))
+            // }
+            (Some((in_fill, in_port)), None) if in_fill < self.channel_low_watermark  => {
+                // println!("CHOICE: 4");
+                try_ret_from_vec(self.channel_high_watermark - in_fill, in_port, &self.sources)
+            }
+            (Some((in_fill, in_port)), None) => {
+                // println!("CHOICE: 4.5");
+                try_ret_from_vec(in_fill, in_port, &self.sources)
+            }
+
+            // ??? -> HERE -> ???
+            (Some((in_fill, in_port)), Some((out_fill, out_port))) if in_fill < self.channel_low_watermark => {
+                // println!("CHOICE: 5");
+                try_ret_from_vec(self.channel_high_watermark - in_fill, in_port, &self.sources)
+            }
+            (Some((in_fill, in_port)), Some((out_fill, out_port))) if out_fill > self.channel_high_watermark => {
+                // println!("CHOICE: 7");
+                try_ret_from_vec(out_fill - self.channel_high_watermark, out_port, &self.destinations)
+            }
+            (Some((in_fill, in_port)), Some((out_fill, out_port)))
+                if (out_fill < self.channel_low_watermark) && not_me(&status.spec_type, &status.control_id) => {
+                    // println!("CHOICE: 6");
+                    Some((self.channel_high_watermark - out_fill, status.spec_type, status.control_id))
+                }
+            (Some((in_fill, in_port)), Some((out_fill, out_port)))
+                if (in_fill > self.channel_high_watermark) && not_me(&status.spec_type, &status.control_id) => {
+                    // println!("CHOICE: 8");
+                    Some((in_fill - self.channel_high_watermark, status.spec_type, status.control_id))
+                }
+            (Some((in_fill, in_port)), Some((out_fill, out_port)))  => {
+                let a = try_ret_from_vec(in_fill, in_port, &self.sources);
+                let b = try_ret_from_vec(out_fill, out_port, &self.destinations);
+                match (a, b) {
+                    (None, Some(b)) => Some(b),
+                    (Some(a), None) => Some(a),
+                    (Some((an, ast, aci)), Some((bn, bst, bci))) if bci > aci => {
+                        // println!("CHOICE: 9");
+                        Some((bn, bst, bci))
+                    },
+                    (Some((an, ast, aci)), Some((bn, bst, bci))) => {
+                        // println!("CHOICE: 10");
+                        Some((an, ast, aci))
+                    },
+                    (None, None) => None,
+                }
+            }
+            _ => {
+                panic!("Both a TAP and a SINK?");
+            }
+        }
+
+    }
+
+    fn get_recommendation(&mut self, status: Option<AccountingStatus>, failed: &Failed) -> Option<(ProcessCount, SpecType, ControlId)> {
+        match status {
+            Some(s) => match self.get_recommendation_normal(s, &failed) {
+                None => self.get_recommendation_fail(&failed),
+                Some(s) => Some(s),
+            },
+            None => self.get_recommendation_fail(&failed),
+        }
+    }
 }
 
+#[test]
+fn test_accounting_recommendation() {
+
+    let failed: &Failed = &Failed::new(100);
+
+    let mut accounting_builder = AccountingBuilder::new(7, 5, 3);
+    accounting_builder.add_join(ControlInput(SpecType::TapSpec, "TAP1".to_owned(), -1), ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 0));
+    accounting_builder.add_join(ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), -1), ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), 0));
+    accounting_builder.add_join(ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), -1), ControlInput(SpecType::SinkSpec, "SNK1".to_owned(), 0));
+    let mut accounting = accounting_builder.build();
+
+    // TAP1 --(2)--> BUF1(0) --(2)--> CMD1(1) -> SNK1(0)
+
+    let mut tap1_ps1 = ProcessStatus::new();
+    let mut buf1_ps1 = ProcessStatus::new();
+    let mut cmd1_ps1 = ProcessStatus::new();
+    tap1_ps1.add_to_wrote_to(vec![-1; 5].into_iter());
+    buf1_ps1.add_to_read_from(vec![0; 3].into_iter());
+    buf1_ps1.add_to_wrote_to(vec![-1; 3].into_iter());
+    cmd1_ps1.add_to_read_from(vec![0].into_iter());
+
+    let mut buf1_ps1_expected = ProcessStatus::new();
+    buf1_ps1_expected.add_to_read_from(vec![0; 3].into_iter());
+    buf1_ps1_expected.add_to_wrote_to(vec![-1; 3].into_iter());
+
+
+    accounting.update(SpecType::TapSpec, "TAP1".to_owned(), &tap1_ps1);
+    accounting.update(SpecType::BufferSpec, "BUF1".to_owned(), &buf1_ps1);
+    accounting.update(SpecType::CommandSpec, "CMD1".to_owned(), &cmd1_ps1);
+
+    let expected1 = AccountingStatus {
+        process_status: buf1_ps1_expected,
+        spec_type: SpecType::BufferSpec,
+        control_id: "BUF1".to_owned(),
+        inbound_ports: vec![2],
+        outbound_ports: vec![2],
+    };
+
+    assert_eq!(expected1, accounting.get_accounting_status(&SpecType::BufferSpec, &"BUF1".to_owned(), buf1_ps1));
+    assert_eq!(
+        Some((3, SpecType::BufferSpec, "BUF1".to_owned())),
+        accounting.get_recommendation_normal(expected1, failed)
+    );
+
+    // =========================================================================
+
+    // TAP1 --(0)--> BUF1(0) --(4)--> CMD1(1) -> SNK1(0)
+
+    let mut buf1_ps2 = ProcessStatus::new();
+    buf1_ps2.add_to_read_from(vec![0; 2].into_iter());
+    buf1_ps2.add_to_wrote_to(vec![-1; 2].into_iter());
+    println!("PS: {:?}", buf1_ps2);
+    println!("ACC: {:?}", accounting);
+    accounting.update(SpecType::BufferSpec, "BUF1".to_owned(), &buf1_ps2);
+    println!("ACC: {:?}", accounting.pipe_size);
+
+    let mut buf1_ps2_expected = ProcessStatus::new();
+    buf1_ps2_expected.add_to_read_from(vec![0; 2].into_iter());
+    buf1_ps2_expected.add_to_wrote_to(vec![-1; 2].into_iter());
+
+    let expected2 = AccountingStatus {
+        process_status: buf1_ps2_expected,
+        spec_type: SpecType::BufferSpec,
+        control_id: "BUF1".to_owned(),
+        inbound_ports: vec![0],
+        outbound_ports: vec![4],
+    };
+
+    assert_eq!(expected2, accounting.get_accounting_status(&SpecType::BufferSpec, &"BUF1".to_owned(), buf1_ps2));
+    assert_eq!(
+        Some((3, SpecType::TapSpec, "TAP1".to_owned())),
+        accounting.get_recommendation_normal(expected2, failed)
+    );
+
+}
 
 #[test]
 fn test_accounting_buffers() {
 
-    let mut accounting = Accounting::new(5, 4, 3);
-    accounting.add_join(ControlInput(SpecType::TapSpec, "TAP1".to_owned(), 0), ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), -1));
-    accounting.add_join(ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 0), ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), -1));
+    assert_eq!(1, Accounting::outbound_connection_id_to_vec_index(-2));
+    assert_eq!(0, Accounting::outbound_connection_id_to_vec_index(-1));
+
+    let mut accounting_builder = AccountingBuilder::new(5, 4, 3);
+    accounting_builder.add_join(ControlInput(SpecType::TapSpec, "TAP1".to_owned(), -1), ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), 0));
+    accounting_builder.add_join(ControlInput(SpecType::BufferSpec, "BUF1".to_owned(), -1), ControlInput(SpecType::CommandSpec, "CMD1".to_owned(), 0));
+    let mut accounting = accounting_builder.build();
+    println!("ACC: {:?}", accounting);
 
     let mut tap1_ps = ProcessStatus::new();
     let mut buf1_ps = ProcessStatus::new();
     let mut cmd1_ps = ProcessStatus::new();
-    tap1_ps.add_to_wrote_to(vec![0; 9].into_iter());
-    buf1_ps.add_to_read_from(vec![-1; 7].into_iter());
-    buf1_ps.add_to_wrote_to(vec![0; 3].into_iter());
-    cmd1_ps.add_to_read_from(vec![-1].into_iter());
+    tap1_ps.add_to_wrote_to(vec![-1; 9].into_iter());
+    buf1_ps.add_to_read_from(vec![0; 7].into_iter());
+    buf1_ps.add_to_wrote_to(vec![-1; 3].into_iter());
+    cmd1_ps.add_to_read_from(vec![0].into_iter());
 
 
-    accounting.update(SpecType::TapSpec, "TAP1".to_owned(), tap1_ps);
-    accounting.update(SpecType::BufferSpec, "BUF1".to_owned(), buf1_ps);
-    accounting.update(SpecType::CommandSpec, "CMD1".to_owned(), cmd1_ps);
+    accounting.update(SpecType::TapSpec, "TAP1".to_owned(), &tap1_ps);
+    accounting.update(SpecType::BufferSpec, "BUF1".to_owned(), &buf1_ps);
+    accounting.update(SpecType::CommandSpec, "CMD1".to_owned(), &cmd1_ps);
 
     enum ProcessAttempt {
         Sure(usize),
@@ -332,25 +900,29 @@ fn test_accounting_buffers() {
     // Every control has a status based on it's input channel. Given an
     // Accounting::new(10, 6, 3) it can be in the following states
     //
-    //   * Full     = 10
-    //   * Stuffed  = 7 - 10 (When any sources are)
-    //   * Ok       = 3 - 6
-    //   * Hungry   = 1 - 3 (When all sources are beneath)
-    //   * Starved  = 0
+    //   * Max       = 10
+    //   * Stuffed   = 7 - 9 (When any sources are)
+    //   * Satisfied = 3 - 6
+    //   * Hungry    = 1 - 3 (When all sources are beneath)
+    //   * Starved   = 0
     //
     // If any control is Full turn off (relevant) taps.
     // If more than a quarter of controls are Stuffed turn of (relevant) taps.
     // If all OK turn on (relevant) taps.
     // If more than a third Hungry turn on (relevant) taps.
     //
-    // If Hungry and Source is Ok, run Source
-    // If Stuffed and Destination Ok, run Self until Destination is Stuffed or Self Ok
-    // If Full and not command or junction run
-
-
-
+    // If Hungry, run Source till either Source = Hungry or Self = Stuffed
+    // If Stuffed and Destination less so, run Self until Destination <= Self
+    //
+    // Hunger level defined by
+    //
+    // If any above low water mark Satisfied
+    // If all empty then Starved
+    // If all above high water mark Stuffed
+    // If all full then Max
+    //
     // TODO: Desire for:
-    //         * Below low mark to run till child hits high water mark (or full for buffers)
+    //         * Below low mark to run till hits high water mark (or full for buffers)
     //         * Commands after buffers which are are not empty to ran to empty buffer
     //         * Buffers to be empty
     //         * Commands after buffers which are are not empty to ran to low water mark
@@ -631,17 +1203,6 @@ fn test_find_graph_taps() {
 }
 
 
-
-
-// impl std::fmt::Display for Accounting {
-//     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-//         for e in enter {
-
-//         // write!(f, "ConstructionError::MissingSinkOutput: The configuration requires the following outputs but they were not specified: {:?}", e)
-//     }
-// }
-
-
 #[derive(Debug)]
 enum TapMethod {
     STDIN,
@@ -792,8 +1353,8 @@ struct Controls {
 
 impl Controls {
 
-    fn get_processors(&mut self) -> HashMap<(SpecType, String), Box<dyn Processable + Send>> {
-        let mut r: HashMap<(SpecType, String), Box<dyn Processable + Send>> = HashMap::new();
+    fn get_processors(&mut self) -> HashMap<(SpecType, ControlId), Box<dyn Processable + Send>> {
+        let mut r: HashMap<(SpecType, ControlId), Box<dyn Processable + Send>> = HashMap::new();
 
         for (k, mut v) in self.tap_file.drain() {
             match v.get_processor().ok() {
@@ -1059,7 +1620,7 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
                     }
                 }
             },
-            Builder::JoinSpec(j) => Some(Builder::JoinSpec(j)), // TODO
+            Builder::JoinSpec(j) => Some(Builder::JoinSpec(j)),
         };
         match re_add {
             Some(x) => { builders.push(x); },
@@ -1119,14 +1680,14 @@ fn main() {
         }
     };
 
-    let mut accounting = Accounting::new(CHANNEL_SIZE, (CHANNEL_SIZE / 2) + 1, (CHANNEL_SIZE / 4) + 1);
+    let mut accounting_builder = AccountingBuilder::new(16, 8, 4);
 
     for b in builders {
         let r = match b {
             Builder::JoinSpec(j) => {
                 match controls.join(&j) {
                     Some((c1, c2)) => {
-                        accounting.add_join(
+                        accounting_builder.add_join(
                             ControlInput(j.src.spec_type, j.src.name, c1),
                             ControlInput(j.dst.spec_type, j.dst.name, c2)
                         );
@@ -1139,64 +1700,104 @@ fn main() {
         };
     }
 
+    let mut accounting = accounting_builder.build();
     let mut processors = controls.get_processors();
 
 
     let jjoin_handle = std::thread::spawn(move || {
 
-        fn do_sync_send(tx: &SyncSender<AccountingMsg>, msg: AccountingMsg) {
-
-            enum E {
-                Missing,
-                CouldNotSend,
-            }
-
-            let mut om = Some(msg);
-            let mut i = 0;
-            while i < 100 {
-                i = i + 1;
-                let r = std::mem::take(&mut om)
-                    .ok_or(E::Missing)
-                    .and_then(|m| tx.send(m).map_err(|ee| match ee {
-                        std::sync::mpsc::SendError(m) => {
-                            std::mem::replace(&mut om, Some(m));
-                            E::CouldNotSend
-                        }
-                    }));
-
-                match r {
-                    Ok(_) => return (),
-                    Err(_) => (),
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            panic!("Could not send accounting message in 1s threshold");
-        }
-
         let mut loop_number: usize = 0;
         let debug: bool = true;
 
-        // print!("CSV: {}", accounting.debug_header());
+        println!("TAPS: {:?}", accounting.get_taps());
+        print!("CSV: {}", accounting.debug_header());
+
+        let mut currents: Vec<Option<(ProcessCount, (SpecType, ControlId), ControlId)>> = accounting.get_taps()
+            .into_iter()
+            .map(|t| Some((CHANNEL_HIGH_WATERMARK, (t.0, t.1.clone()), t.1)))
+            .collect();
+
+        // let get_src_for_index = |spec_type: SpecType, control_id: ControlId, i: usize| {
+        //     let o = accounting.sources
+        //         .get(&(spec_type, control_id))
+        //         .and_then(|&v| v.get(i));
+        // };
+
+        let mut failed: Failed = Failed::new(100);
+        let mut inst: Instant = Instant::now();
         loop {
             loop_number = loop_number + 1;
 
-            for (pair, proc) in &mut processors {
-                let (spec_type, name) = pair;
-                let process_result = proc.process();
-                // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
-                // println!("AC: {:?}", accounting);
-                for line in accounting.update(spec_type.to_owned(), name.to_string(), process_result) {
-                    // print!("CSV: {}", line);
+            // println!("CURRENTS: {:?}", currents);
+            // println!("PIPE:     {:?}", &accounting.pipe_size);
+            for current in &mut currents {
+                match current {
+                    Some((count, spec_control, tap_id)) => {
+
+                        let (spec_type, control_id) = spec_control;
+
+                        let next_status = match processors.get_mut(&(*spec_type, control_id.clone())) {
+                            None => None,
+                            Some(processor) => {
+                                let process_status = processor.process(*count);
+                                let csv_lines = accounting.update(
+                                    *spec_type,
+                                    control_id.to_owned(),
+                                    &process_status
+                                );
+                                // for line in csv_lines {
+                                //     print!("CSV: {}", line);
+                                // }
+                                Accounting::update_failed(spec_type, control_id, &process_status, &mut failed);
+                                let next_status = accounting.get_accounting_status(&spec_type, &control_id, process_status);
+                                Some(next_status)
+                            }
+                        };
+
+
+                        // println!("=====================");
+                        // println!("PS1: {:?}", &accounting.pipe_size);
+                        // println!("CUR: {:?}: {:?}", &spec_type, &control_id);
+                        // println!("STA: {:?}", &next_status);
+
+
+                        let rec = accounting.get_recommendation(next_status, &mut failed);
+
+                        match rec {
+                            Some((read_count, next_spec_type, next_control_id)) => {
+                                *count = read_count;
+                                *spec_control = (next_spec_type, next_control_id);
+                                // *current = Some((read_count, (next_spec_type, next_control_id), tap_id));
+                            }
+                            None => {
+                                std::thread::sleep(failed.till_clear());
+                            }
+                        }
+
+
+                    },
+                    None => (),
                 }
-            }
+            };
+
+
+
+            // for (pair, proc) in &mut processors {
+            //     let (spec_type, name) = pair;
+            //     let process_result = proc.process();
+            //     let accounting_return = accounting.update(spec_type.to_owned(), name.to_string(), process_result);
+            //     // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
+            //     // println!("AC: {:?}", accounting.destinations);
+            // }
 
             // if debug && ((loop_number % 10000) == 0) {
+            // std::thread::sleep(std::time::Duration::from_millis(10));
+            // }
             //     eprintln!("=============================================================== {}", loop_number);
             //     eprintln!("ACCOUNTING: SIZE: {:?}", accounting.pipe_size);
             //     // eprintln!("ACCOUNTING: INCOMING: {:?}", accounting.enter);
             //     // eprintln!("ACCOUNTING: OUTGOING: {:?}", accounting.leave);
             //     std::thread::sleep(std::time::Duration::from_millis(10));
-            // }
             // println!("LOOP: {}", loop_number);
 
         }
