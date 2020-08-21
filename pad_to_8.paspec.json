@@ -19,6 +19,21 @@
       "spec": { "command": "grep", "args": [ "--line-buffered", ".\\{6\\}\\:" ] }
     },
     {
+      "name": "ADD_REQUIRE",
+      "src": [
+        { "name": "INPUT", "port": "OUT" }
+      ],
+      "spec": { "command": "sed", "args": [ "-u", "s/^\\([0-9]\\+\\).*/REQUIRE: \\1/" ] }
+    },
+    {
+      "name": "TERMINATOR",
+      "src": [
+        { "name": "ADD_REQUIRE", "port": "OUT" },
+        { "name": "GOOD", "port": "OUT" }
+      ],
+      "spec": { "command": "./target/debug/pipeawesome-terminator", "args": [ "-g", "5", "-r", "REQUIRE: ", "-l", "^0*([^:]+).*", "-p", "$1" ] }
+    },
+    {
       "name": "BAD",
       "src": [
         { "name": "INPUT", "port": "OUT" },
@@ -33,6 +48,6 @@
     }
   ],
   "outputs": {
-    "OUTPUT": [ { "name": "GOOD", "port": "OUT" } ]
+    "OUTPUT": [ { "name": "TERMINATOR", "port": "OUT" } ]
   }
 }

@@ -1,6 +1,3 @@
-#[path = "common_types.rs"]
-mod common_types;
-
 use std::ffi::{ OsStr };
 use petgraph::dot::Dot;
 use std::path::Path;
@@ -10,16 +7,10 @@ use std::collections::{ BTreeMap, HashMap, BTreeSet };
 use petgraph::stable_graph::{ StableGraph, NodeIndex };
 use petgraph::{ Direction };
 use serde::Deserialize;
-use super::common_types::*;
 
-#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord, Hash, Copy)]
-pub enum SpecType {
-    BufferSpec,
-    CommandSpec,
-    JunctionSpec,
-    SinkSpec,
-    TapSpec,
-}
+#[path = "common_types.rs"]
+mod common_types;
+use crate::common_types::*;
 
 fn string_to_control(s: &str) -> SpecType {
     match s {
