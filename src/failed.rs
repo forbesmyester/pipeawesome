@@ -2,7 +2,7 @@ use std::time::{Duration, Instant };
 use std::collections::HashSet;
 use std::convert::TryFrom;
 
-use crate::common_types::ControlIndex;
+use crate::accounting::ControlIndex;
 
 #[derive(Debug)]
 pub struct Failed (Option<Instant>, HashSet<ControlIndex>, u128);

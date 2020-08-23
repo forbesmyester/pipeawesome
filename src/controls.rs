@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError, TryRecvError, Receiver};
 
 
-use crate::common_types::*;
+use crate::config::Port;
 
 
 const BUFREADER_CAPACITY: usize = 40;
@@ -26,11 +26,14 @@ pub trait GetWrite {
     fn get_write(&self) -> Self::W;
 }
 
+pub type ProcessCount = usize;
+
 pub trait Processable {
     fn process(&mut self, desired_count: ProcessCount) -> Result<ProcessStatus, ProcessError>;
 }
 
 
+pub type ConnectionId = isize;
 pub struct Connected(pub Receiver<Line>, pub ConnectionId);
 
 
@@ -51,23 +54,6 @@ impl std::fmt::Display for ProcessError {
 }
 
 
-
-
-#[derive(Debug)]
-pub enum SinkWriteError {
-    TryRecvError(TryRecvError),
-    WriteError(std::io::Error),
-}
-
-
-impl std::fmt::Display for SinkWriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            SinkWriteError::WriteError(e) => write!(f, "SinkWriteError: WriteError: {}", e),
-            SinkWriteError::TryRecvError(e) => write!(f, "SinkWriteError: TryRecvError: {}", e),
-        }
-    }
-}
 
 
 #[derive(Debug)]
@@ -112,13 +98,6 @@ impl std::fmt::Display for ProcessorAlreadyUsedError {
 }
 
 
-#[derive(Debug)]
-#[derive(PartialEq)]
-enum SinkWriteStatus {
-    FINISHED,
-    ONGOING,
-}
-
 fn do_sync_send(tx: &SyncSender<Line>, msg: &Option<String>) {
     loop {
         match tx.send(msg.clone()) {
@@ -154,7 +133,7 @@ impl InputOutput for Buffer {
 
         match s {
             Port::OUT => {
-                std::mem::replace(&mut self.tx, Some(tx));
+                self.tx = Some(tx);
                 Ok(Connected(rx, -1))
             },
             _ => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
@@ -165,7 +144,7 @@ impl InputOutput for Buffer {
     fn add_input(&mut self, _: u32, rx: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
         match self.rx {
             None => {
-                std::mem::replace(&mut self.rx, Some(rx));
+                self.rx = Some(rx);
                 Ok(0)
             }
             _ => Err(CannotAllocateInputError::CannotAllocateInputError)
@@ -292,7 +271,7 @@ impl <R: GetRead + Send> InputOutput for Tap<R> {
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
 
         if self.tx.is_none() {
-            std::mem::replace(&mut self.tx, Some(tx));
+            self.tx = Some(tx);
             return Ok(Connected(rx, -1))
         }
         Err(CannotAllocateOutputError::CannotAllocateOutputError)
@@ -407,7 +386,7 @@ impl <R: 'static +  GetRead + Send> TapProcessor<R> {
                 self.pending
             );
         }
-        std::mem::replace(&mut self.pending, Some(line));
+        self.pending = Some(line);
     }
 
     fn do_pending_send(&mut self, mut ps: ProcessStatus) -> ProcessStatus {
@@ -441,7 +420,7 @@ impl <R: 'static +  GetRead + Send> Processable for TapProcessor<R> {
 
         let mut ps = ProcessStatus::new();
 
-        for i in 0..desired_count {
+        for _i in 0..desired_count {
             ps = self.do_pending_send(ps);
 
             match &ps.stopped_by {
@@ -498,7 +477,7 @@ impl <W: GetWrite + Send> InputOutput for Sink<W> {
 
     fn add_input(&mut self, _: u32, input: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
         if self.input.is_none() {
-            std::mem::replace(&mut self.input, Some(input));
+            self.input = Some(input);
             return Ok(0)
         }
         Err(CannotAllocateInputError::CannotAllocateInputError)
@@ -543,7 +522,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
     fn setup(&mut self) {
 
         let (err_tx, err_rx): (SyncSender<ProcessError>, Receiver<ProcessError>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
-        std::mem::replace(&mut self.err_rx, Some(err_rx));
+        self.err_rx = Some(err_rx);
 
         match (std::mem::take(&mut self.int_rx), std::mem::take(&mut self.get_w)) {
             (Some(int_rx), Some(get_buf)) => {
@@ -557,7 +536,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
                                     Err(e) => {
                                         err_tx.send(
                                             ProcessError(e, "Error flushing at end of stream".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error flushing at end of stream\"");
                                         return;
                                     }
                                 }
@@ -568,7 +547,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
                                     Err(e) => {
                                         err_tx.send(
                                             ProcessError(e, "Error writing line".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error writing line\"");
                                         return;
                                     }
                                     Ok(_) => (),
@@ -578,7 +557,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
                                     Err(e) => {
                                         err_tx.send(
                                             ProcessError(e, "Error flushing at end of stream".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error flushing at end of stream\"");
                                         return;
                                     }
                                 }
@@ -589,7 +568,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
                                     Err(e) => {
                                         err_tx.send(
                                             ProcessError(e, "Error flushing line in stream".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error flushing line in stream\"");
                                         return;
                                     }
                                 }
@@ -620,7 +599,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
         // println!("L: {:?}", line);
         match self.int_tx.try_send(line) {
             Err(TrySendError::Full(l)) | Err(TrySendError::Disconnected(l)) => {
-                std::mem::replace(&mut self.pending, Some(l));
+                self.pending = Some(l);
                 ps.set_stopped_by(StoppedBy::OutputFull);
             },
             Ok(_) => {
@@ -664,7 +643,7 @@ impl <W: 'static + Send + GetWrite> Processable for SinkProcessor<W> {
 
             match self.rx.try_recv() {
                 Ok(line) => {
-                    std::mem::replace(&mut self.pending, Some(line));
+                    self.pending = Some(line);
                 }
                 _ => {
                     ps.set_stopped_by(StoppedBy::Waiting);
@@ -761,7 +740,7 @@ impl <E: IntoIterator<Item = (K, V)>,
 
     fn add_input(&mut self, _: u32, input: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
         if self.stdin.is_none() {
-            std::mem::replace(&mut self.stdin, Some(input));
+            self.stdin = Some(input);
             return Ok(0);
         }
         Err(CannotAllocateInputError::CannotAllocateInputError)
@@ -776,7 +755,7 @@ impl <E: IntoIterator<Item = (K, V)>,
                 match &self.exit {
                     Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
                     None => {
-                        std::mem::replace(&mut self.exit, Some(tx));
+                        self.exit = Some(tx);
                         Ok(Connected(rx,-3))
                     }
                 }
@@ -785,7 +764,7 @@ impl <E: IntoIterator<Item = (K, V)>,
                 match &self.stderr {
                     Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
                     None => {
-                        std::mem::replace(&mut self.stderr, Some(tx));
+                        self.stderr = Some(tx);
                         Ok(Connected(rx,-2))
                     }
                 }
@@ -794,7 +773,7 @@ impl <E: IntoIterator<Item = (K, V)>,
                 match &self.stdout {
                     Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
                     None => {
-                        std::mem::replace(&mut self.stdout, Some(tx));
+                        self.stdout = Some(tx);
                         Ok(Connected(rx,-1))
                     }
                 }
@@ -873,7 +852,7 @@ impl CommandProcessor {
         let (error_tx_stdin, error_rx): (SyncSender<ProcessError>, Receiver<ProcessError>) = sync_channel(1);
         let error_tx_stdout = error_tx_stdin.clone();
         let error_tx_stderr = error_tx_stdin.clone();
-        std::mem::replace(&mut self.error_rx, Some(error_rx));
+        self.error_rx = Some(error_rx);
 
         let stdin_joinhandle = match std::mem::take(&mut self.child.stdin) {
             Some(mut stdin) => {
@@ -889,7 +868,7 @@ impl CommandProcessor {
                                     Err(e) => {
                                         error_tx_stdin.send(
                                             ProcessError(e, "Error flushing at end of stream".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error flushing at end of stream\"");
                                         return;
                                     }
                                 }
@@ -900,7 +879,7 @@ impl CommandProcessor {
                                     Err(e) => {
                                         error_tx_stdin.send(
                                             ProcessError(e, "Error writing line".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error writing line\"");
                                         return;
                                     }
                                 }
@@ -909,7 +888,7 @@ impl CommandProcessor {
                                     Err(e) => {
                                         error_tx_stdin.send(
                                             ProcessError(e, "Error flushing line in stream".to_owned()),
-                                        );
+                                        ).expect("Error sending \"Error flushing line in stream\"");
                                         return;
                                     }
                                 }
@@ -924,7 +903,7 @@ impl CommandProcessor {
             },
             _ => None,
         };
-        std::mem::replace(&mut self.stdin_joinhandle, stdin_joinhandle);
+        self.stdin_joinhandle = stdin_joinhandle;
 
 
         let stdout_joinhandle = match std::mem::take(&mut self.child.stdout) {
@@ -940,7 +919,7 @@ impl CommandProcessor {
                             Err(e) => {
                                 error_tx_stdout.send(
                                     ProcessError(e, "Error writing to STDOUT".to_owned()),
-                                );
+                                ).expect("Error sending \"Error writing to STDOUT\"");
                                 return;
                             }
                         }
@@ -949,7 +928,7 @@ impl CommandProcessor {
             },
             _ => None,
         };
-        std::mem::replace(&mut self.stdout_joinhandle, stdout_joinhandle);
+        self.stdout_joinhandle = stdout_joinhandle;
 
 
         let stderr_joinhandle = match std::mem::take(&mut self.child.stderr) {
@@ -965,7 +944,7 @@ impl CommandProcessor {
                             Err(e) => {
                                 error_tx_stderr.send(
                                     ProcessError(e, "Error writing to STDERR".to_owned()),
-                                );
+                                ).expect("Error sending \"Error writing to STDERR\"");
                                 return;
                             }
                         }
@@ -975,7 +954,7 @@ impl CommandProcessor {
             _ => None,
         };
 
-        std::mem::replace(&mut self.stderr_joinhandle, stderr_joinhandle);
+        self.stderr_joinhandle = stderr_joinhandle;
 
     }
 
@@ -1012,10 +991,10 @@ impl CommandProcessor {
                         match trysend(inner_stdin_tx, pending_stdin_line) {
                             SendStatus::Pending(v) => {
                                 ps.set_stopped_by(StoppedBy::InternallyFull);
-                                std::mem::replace(&mut self.pending_stdin, Some(v));
+                                self.pending_stdin = Some(v);
                             },
                             SendStatus::Finished => {
-                                std::mem::replace(&mut self.inner_stdin_tx, None);
+                                self.inner_stdin_tx = None;
                             },
                             SendStatus::Sent => {
                                 ps.add_to_read_from(vec![0].into_iter());
@@ -1036,10 +1015,10 @@ impl CommandProcessor {
                         match trysend(stdout_tx, pending_stdout_line) {
                             SendStatus::Pending(v) => {
                                 ps.set_stopped_by(StoppedBy::OutputFull);
-                                std::mem::replace(&mut self.pending_stdout, Some(v));
+                                self.pending_stdout = Some(v);
                             },
                             SendStatus::Finished => {
-                                std::mem::replace(&mut self.stdout_tx, None);
+                                self.stdout_tx = None;
                             },
                             SendStatus::Sent => {
                                 ps.add_to_wrote_to(vec![-1].into_iter());
@@ -1060,10 +1039,10 @@ impl CommandProcessor {
                         match trysend(stderr_tx, pending_stderr_line) {
                             SendStatus::Pending(v) => {
                                 ps.set_stopped_by(StoppedBy::OutputFull);
-                                std::mem::replace(&mut self.pending_stderr, Some(v));
+                                self.pending_stderr = Some(v);
                             },
                             SendStatus::Finished => {
-                                std::mem::replace(&mut self.stderr_tx, None);
+                                self.stderr_tx = None;
                             },
                             SendStatus::Sent => {
                                 ps.add_to_wrote_to(vec![-2].into_iter());
@@ -1081,7 +1060,7 @@ impl CommandProcessor {
                 match exit_tx.try_send(Some(format!("{}", status))) {
                     Ok(_) => {
                         ps.add_to_wrote_to(vec![-3].into_iter());
-                        std::mem::replace(&mut self.exit_status_sent, true);
+                        self.exit_status_sent = true;
                         self.close_exit_status_channel();
                     }
                     Err(TrySendError::Full(_v)) => (),
@@ -1109,7 +1088,7 @@ impl CommandProcessor {
             Some(exit_tx) => {
                 match exit_tx.try_send(None) {
                     Ok(_) => {
-                        std::mem::replace(&mut self.exit_tx, None);
+                        self.exit_tx = None;
                     }
                     Err(TrySendError::Full(_v)) => (),
                     Err(TrySendError::Disconnected(_v)) => (),
@@ -1441,10 +1420,7 @@ impl JunctionProcessor {
             None => self.output.len(),
         };
 
-        std::mem::replace(
-            &mut self.partially_sent,
-            new_pending
-        );
+        self.partially_sent = new_pending;
 
         if skip_accounting {
             return Vec::new();
@@ -1460,7 +1436,7 @@ impl JunctionProcessor {
 
 
     fn mark_input_empty(&mut self, priority: usize, pos: usize) {
-        std::mem::replace(&mut self.input[priority][pos], None);
+        self.input[priority][pos] = None;
     }
 
 }
@@ -1494,13 +1470,13 @@ impl Processable for JunctionProcessor {
                 Ok((priority, pos, _connection_id, None)) => {
                     self.mark_input_empty(priority, pos);
                     if JunctionProcessor::no_inputs_left(&self.input) {
-                        std::mem::replace(&mut self.partially_sent, Some(PendingMessage(0, None)));
+                        self.partially_sent = Some(PendingMessage(0, None));
                     }
                     process_status.add_to_wrote_to(self.send_if_required().iter().map(|i| *i));
                 },
                 Ok((priority, pos, connection_id, Some(s))) => {
                     JunctionProcessor::mark_position(&mut self.positions, priority, pos);
-                    std::mem::replace(&mut self.partially_sent, Some(PendingMessage(0, Some(s))));
+                    self.partially_sent = Some(PendingMessage(0, Some(s)));
                     process_status.add_to_read_from(vec![connection_id].into_iter());
                     process_status.add_to_wrote_to(self.send_if_required().iter().map(|i| *i));
                 },
@@ -1583,7 +1559,6 @@ pub type WroteTo = HashMap<ConnectionId, usize>;
 
 #[derive(Debug)]
 pub enum StoppedBy {
-    IOError(std::io::Error),
     StillWorking,
     ExhaustedInput,
     Waiting,
@@ -1595,7 +1570,6 @@ impl PartialEq for StoppedBy
 {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (StoppedBy::IOError(_), StoppedBy::IOError(_)) => true,
             (StoppedBy::StillWorking, StoppedBy::StillWorking) => true,
             (StoppedBy::ExhaustedInput, StoppedBy::ExhaustedInput) => true,
             (StoppedBy::Waiting, StoppedBy::Waiting) => true,
@@ -1650,7 +1624,7 @@ impl ProcessStatus {
     }
 
     pub fn set_stopped_by(&mut self, sb: StoppedBy) {
-        std::mem::replace(&mut self.stopped_by, sb);
+        self.stopped_by = sb;
     }
 }
 

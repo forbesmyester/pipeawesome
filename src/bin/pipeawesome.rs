@@ -4,9 +4,6 @@ mod controls;
 #[path = "../config.rs"]
 mod config;
 
-#[path = "../common_types.rs"]
-mod common_types;
-
 #[path = "../accounting.rs"]
 mod accounting;
 
@@ -14,31 +11,23 @@ mod accounting;
 mod failed;
 
 use std::thread::JoinHandle;
-use core::hash::Hash;
 use std::collections::HashSet;
 use petgraph::{ Direction };
 use petgraph::dot::Dot;
 use clap::{Arg as ClapArg, App as ClapApp};
 
-use std::time::{Duration, Instant };
-use std::convert::TryFrom;
 use std::path::Path;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
-use std::cmp::{ Ord, Ordering };
 
 use crate::accounting::*;
 use crate::failed::*;
 use crate::controls::*;
 use crate::config::*;
-use crate::common_types::*;
 
 const CHANNEL_SIZE: usize = 16;
 const CHANNEL_LOW_WATERMARK: usize = 4;
 const CHANNEL_HIGH_WATERMARK: usize = 8;
-
-type PipeSizeHash = HashMap<ControlIndex, Vec<usize>>;
 
 #[derive(Debug)]
 pub enum ConstructionError {
@@ -63,136 +52,6 @@ impl std::fmt::Display for ConstructionError {
     }
 }
 
-
-// const INPUT: &str = "I";
-// const COMMAND: &str = "C";
-// const FAN: &str = "A";
-// const OUTPUT: &str = "O";
-
-
-// #[derive(Debug)]
-// #[derive(PartialEq)]
-// struct GraphMoveProgress {
-//     finished: Vec<EdgeIndex>,
-//     in_progress: Vec<EdgeIndex>,
-//     steps: Vec<NodeIndex>,
-// }
-
-
-// fn graph_shuffle(graph: &Graph<&str, u32>, gmp: &mut GraphMoveProgress) {
-//     while gmp.in_progress.len() > 0 {
-//         let edge = gmp.in_progress.remove(0);
-//         let (_, node) = graph.edge_endpoints(edge).unwrap();
-//         let neighbors = graph.neighbors(node);
-//         let mut has_neighbors = false;
-//         for n in neighbors {
-//             has_neighbors = true;
-//             if graph[n][0..1] == *COMMAND {
-//                 println!("F: {:?}", n);
-//                 gmp.finished.push(graph.find_edge(node, n).unwrap());
-//             } else {
-//                 println!("P: {:?}", n);
-//                 gmp.in_progress.push(graph.find_edge(node, n).unwrap());
-//             }
-//         }
-//         if !has_neighbors {
-//             gmp.finished.push(edge);
-//         } else {
-//             gmp.steps.push(node);
-//         }
-//     }
-// }
-
-// #[test]
-// fn can_graph_shuffle() {
-
-//     let mut graph = Graph::<&str, u32, petgraph::Directed, u32>::new();
-//     let quality_control = graph.add_node("C:QUALITY_CONTROL");
-//     let fan_1 = graph.add_node("A:1");
-//     let fail_hot = graph.add_node("C:FAIL_HOT");
-//     let fail_cold = graph.add_node("C:FAIL_COLD");
-//     let fan_2 = graph.add_node("A:2");
-//     let funnel_1 = graph.add_node("U:1");
-//     let prepare_output = graph.add_node("O:prepare_output");
-
-//     graph.extend_with_edges(&[
-//         (quality_control, fan_1, 1),
-//         (fan_1, fail_cold, 1),
-//         (fan_1, fail_hot, 1),
-//         (fan_1, fan_2, 1),
-//         (fan_2, prepare_output, 1),
-//         (fail_hot, funnel_1, 1),
-//         (fail_cold, funnel_1, 1),
-//         (funnel_1, quality_control, 1),
-//     ]);
-
-//     let mut gmp = GraphMoveProgress {
-//         in_progress: vec![graph.find_edge(quality_control, fan_1).unwrap()],
-//         finished: vec![],
-//         steps: vec![],
-//     };
-
-//     let expected_gmp = GraphMoveProgress {
-//         in_progress: vec![],
-//         finished: vec![
-//             graph.find_edge(fan_1, fail_hot).unwrap(),
-//             graph.find_edge(fan_1, fail_cold).unwrap(),
-//             graph.find_edge(fan_2, prepare_output).unwrap(),
-//         ],
-//         steps: vec![
-//             fan_1,
-//             fan_2
-//         ]
-//     };
-
-//     graph_shuffle(&graph, &mut gmp);
-
-//     println!("S: {:?}", gmp.steps);
-//     assert_eq!(expected_gmp, gmp);
-// }
-
-
-// #[test]
-// fn can_rescore() {
-
-//     let mut graph = Graph::<&str, u32, petgraph::Directed, u32>::new();
-//     let input = graph.add_node("I:IN");
-//     let pre = graph.add_node("C:PRE");
-//     let maths = graph.add_node("C:MATHS");
-//     let quality_control = graph.add_node("C:QUALITY_CONTROL");
-//     let fan_1 = graph.add_node("A:1");
-//     let fail_hot = graph.add_node("C:FAIL_HOT");
-//     let fail_cold = graph.add_node("C:FAIL_COLD");
-//     let just_right = graph.add_node("C:JUST_RIGHT");
-//     let out = graph.add_node("O:OUT");
-
-
-//     graph.extend_with_edges(&[
-//         (input, pre, 1),
-//         (pre, maths, 1),
-//         (maths, quality_control, 1),
-//         (quality_control, fan_1, 1),
-//         (fan_1, fail_cold, 1),
-//         (fan_1, fail_hot, 1),
-//         (fan_1, just_right, 1),
-//         (fail_hot, maths, 1),
-//         (fail_cold, maths, 1),
-//         (just_right, out, 1),
-//     ]);
-
-//     assert_eq!(
-//         graph.edge_weight(
-//             graph.find_edge(fan_1, fail_hot).unwrap()
-//         ).unwrap(),
-//         &2
-//     );
-
-//     for n in graph.neighbors(quality_control) {
-//         println!("{:?}", graph[n]);
-//     }
-
-
-// }
 
 fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIndex) {
 
@@ -245,32 +104,32 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
 }
 
 
-// #[test]
-// fn test_strip_ports_from_graph() {
+#[test]
+fn test_strip_ports_from_graph() {
 
-//     let mut graph = StableGraph::<String, u32, petgraph::Directed, u32>::new();
-//     let faucet = graph.add_node("C#T#FAUCET".to_owned());
-//     let faucet_port_out = graph.add_node("P#T#FAUCET#O".to_owned());
-//     let buffer_port_in = graph.add_node("P#B#BUFFER_0#I".to_owned());
-//     let buffer = graph.add_node("C#B#BUFFER_0".to_owned());
-//     let buffer_port_out = graph.add_node("P#B#BUFFER_0#O".to_owned());
-//     let cmd_port_in = graph.add_node("P#C#CMD#I".to_owned());
-//     let cmd = graph.add_node("C#C#CMD".to_owned());
+    let mut graph = petgraph::stable_graph::StableGraph::<String, u32, petgraph::Directed, u32>::new();
+    let faucet = graph.add_node("C#T#FAUCET".to_owned());
+    let faucet_port_out = graph.add_node("P#T#FAUCET#O".to_owned());
+    let buffer_port_in = graph.add_node("P#B#BUFFER_0#I".to_owned());
+    let buffer = graph.add_node("C#B#BUFFER_0".to_owned());
+    let buffer_port_out = graph.add_node("P#B#BUFFER_0#O".to_owned());
+    let cmd_port_in = graph.add_node("P#C#CMD#I".to_owned());
+    let cmd = graph.add_node("C#C#CMD".to_owned());
 
-//     graph.extend_with_edges(&[
-//         (faucet, faucet_port_out, 2),
-//         (faucet_port_out, buffer_port_in, 3),
-//         (buffer_port_in, buffer, 4),
-//         (buffer, buffer_port_out, 5),
-//         (buffer_port_out, cmd_port_in, 6),
-//         (cmd_port_in, cmd, 7),
-//     ]);
+    graph.extend_with_edges(&[
+        (faucet, faucet_port_out, 2),
+        (faucet_port_out, buffer_port_in, 3),
+        (buffer_port_in, buffer, 4),
+        (buffer, buffer_port_out, 5),
+        (buffer_port_out, cmd_port_in, 6),
+        (cmd_port_in, cmd, 7),
+    ]);
 
-//     strip_ports_from_graph(&mut graph, faucet);
-//     println!("{}", Dot::new(&graph));
-//     assert_eq!((3, 2), (graph.node_count(), graph.edge_count()));
+    strip_ports_from_graph(&mut graph, faucet);
+    println!("{}", Dot::new(&graph));
+    assert_eq!((3, 2), (graph.node_count(), graph.edge_count()));
 
-// }
+}
 
 
 fn find_graph_taps(graph: &TheGraph) -> Vec<petgraph::graph::NodeIndex> {
@@ -928,28 +787,26 @@ fn main() {
             };
 
 
-
-            // for (pair, proc) in &mut processors {
-            //     let (spec_type, name) = pair;
-            //     let process_result = proc.process();
-            //     let accounting_return = accounting.update(spec_type.to_owned(), name.to_string(), process_result);
-            //     // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
-            //     // println!("AC: {:?}", accounting.destinations);
-            // }
-
-            // if debug && ((loop_number % 10000) == 0) {
-            // std::thread::sleep(std::time::Duration::from_millis(10));
-            // }
-            //     eprintln!("=============================================================== {}", loop_number);
-            //     eprintln!("ACCOUNTING: SIZE: {:?}", accounting.pipe_size);
-            //     // eprintln!("ACCOUNTING: INCOMING: {:?}", accounting.enter);
-            //     // eprintln!("ACCOUNTING: OUTGOING: {:?}", accounting.leave);
-            //     std::thread::sleep(std::time::Duration::from_millis(10));
-            // println!("LOOP: {}", loop_number);
-
         }
 
-        Ok(0 as usize)
+        // for (pair, proc) in &mut processors {
+        //     let (spec_type, name) = pair;
+        //     let process_result = proc.process();
+        //     let accounting_return = accounting.update(spec_type.to_owned(), name.to_string(), process_result);
+        //     // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
+        //     // println!("AC: {:?}", accounting.destinations);
+        // }
+
+        // if debug && ((loop_number % 10000) == 0) {
+        // std::thread::sleep(std::time::Duration::from_millis(10));
+        // }
+        //     eprintln!("=============================================================== {}", loop_number);
+        //     eprintln!("ACCOUNTING: SIZE: {:?}", accounting.pipe_size);
+        //     // eprintln!("ACCOUNTING: INCOMING: {:?}", accounting.enter);
+        //     // eprintln!("ACCOUNTING: OUTGOING: {:?}", accounting.leave);
+        //     std::thread::sleep(std::time::Duration::from_millis(10));
+        // println!("LOOP: {}", loop_number);
+
     });
 
 

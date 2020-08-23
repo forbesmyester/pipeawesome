@@ -8,9 +8,51 @@ use petgraph::stable_graph::{ StableGraph, NodeIndex };
 use petgraph::{ Direction };
 use serde::Deserialize;
 
-#[path = "common_types.rs"]
-mod common_types;
-use crate::common_types::*;
+#[derive(Debug, Deserialize, PartialEq, Clone, Eq, PartialOrd)]
+pub enum Port {
+    OUT,
+    ERR,
+    EXIT,
+}
+
+
+impl std::fmt::Display for Port {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Port::OUT => write!(f, "O"),
+            Port::ERR => write!(f, "E"),
+            Port::EXIT => write!(f, "X"),
+        }
+    }
+}
+
+
+
+
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord, Hash, Copy)]
+pub enum SpecType {
+    BufferSpec,
+    CommandSpec,
+    JunctionSpec,
+    SinkSpec,
+    TapSpec,
+}
+
+
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
+pub struct Destination {
+    pub spec_type: SpecType,
+    pub name: String,
+}
+
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
+pub struct Source {
+    pub spec_type: SpecType,
+    pub name: String,
+    pub port: Port,
+}
+
 
 fn string_to_control(s: &str) -> SpecType {
     match s {
@@ -31,19 +73,6 @@ pub fn control_to_string(s: &SpecType) -> String {
         SpecType::SinkSpec => "S".to_owned(),
         SpecType::TapSpec => "T".to_owned(),
     }
-}
-
-#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
-pub struct Destination {
-    pub spec_type: SpecType,
-    pub name: String,
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
-pub struct Source {
-    pub spec_type: SpecType,
-    pub name: String,
-    pub port: Port,
 }
 
 impl Ord for Source {

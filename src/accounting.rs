@@ -1,11 +1,11 @@
 use core::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet, HashMap};
+use std::collections::{HashSet, HashMap};
 
 use csv::Writer;
 
-use crate::common_types::*;
+use crate::config::*;
 use crate::failed::*;
-use crate::controls::{Processable, ProcessStatus, StoppedBy};
+use crate::controls::{ConnectionId, Processable, ProcessCount, ProcessStatus, StoppedBy};
 
 
 #[derive(Debug, PartialEq)]
@@ -15,6 +15,33 @@ pub enum AccountingOperation {
 }
 
 type CsvLine = String;
+
+
+pub type ControlId = String;
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
+pub struct ControlIO(pub SpecType, pub ControlId, pub ConnectionId);
+impl ControlIO {
+    pub fn to_tuple(&self) -> (SpecType, ControlId, ConnectionId) {
+        (self.0, self.1.to_owned(), self.2)
+    }
+    pub fn to_tuple_ref(&self) -> (&SpecType, &ControlId, &ConnectionId) {
+        (&self.0, &self.1, &self.2)
+    }
+    pub fn as_control(&self) -> Control {
+        Control(self.0, self.1.to_owned())
+    }
+}
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
+pub struct Control(pub SpecType, pub ControlId);
+impl Control {
+    pub fn to_tuple_ref(&self) -> (&SpecType, &ControlId) {
+        (&self.0, &self.1)
+    }
+}
+
+
+pub type ControlIOIndex = usize;
+pub type ControlIndex = usize;
 
 #[derive(Debug, PartialEq)]
 pub struct AccountingStatus {

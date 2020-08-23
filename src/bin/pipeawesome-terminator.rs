@@ -3,7 +3,7 @@ use std::io::{BufReader, BufRead, Write};
 use std::collections::HashSet;
 use regex::Regex;
 use std::time::Instant;
-use std::sync::mpsc::{sync_channel, SyncSender, SendError, TryRecvError, Receiver};
+use std::sync::mpsc::{sync_channel, SyncSender, SendError, Receiver};
 
 #[derive(Debug)]
 struct Opts {
