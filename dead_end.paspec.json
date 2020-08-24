@@ -1,0 +1,6 @@
+{
+  "commands": [
+    { "name": "TEE", "src": [{ "name": "FAUCET", "port": "OUT" }], "spec": { "command": "tee", "args": ["dead_end_out.txt"] } }
+  ],
+  "outputs": { }
+}

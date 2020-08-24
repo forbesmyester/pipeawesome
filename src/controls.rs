@@ -784,7 +784,6 @@ impl <E: IntoIterator<Item = (K, V)>,
 
 }
 
-
 #[derive(Debug)]
 pub struct CommandProcessor {
     child: std::process::Child,
@@ -803,6 +802,7 @@ pub struct CommandProcessor {
     pending_stdout: Option<Line>,
     pending_stderr: Option<Line>,
     exit_status_sent: bool,
+    close_on_stdin: bool,
 }
 
 impl CommandProcessor {
@@ -817,6 +817,7 @@ impl CommandProcessor {
     {
         let mut cmdp = CommandProcessor {
             child,
+            close_on_stdin: stdout_tx.is_none() && stderr_tx.is_none() && exit_tx.is_none(),
             stdin_rx,
             stdout_tx,
             stderr_tx,
@@ -860,7 +861,6 @@ impl CommandProcessor {
                 std::mem::swap(&mut self.inner_stdin_tx, &mut Some(inner_stdin_tx));
                 Some(std::thread::spawn(move || {
                     loop {
-
                         match inner_stdin_rx.recv() {
                             Ok(None) => {
                                 match stdin.flush() {
@@ -1073,8 +1073,11 @@ impl CommandProcessor {
             _ => (),
         }
 
-        match (&self.inner_stdin_tx, &self.stderr_tx, &self.stdout_tx, &self.exit_tx) {
-            (_, None, None, None) => {
+        match (&self.close_on_stdin, &self.inner_stdin_tx, &self.stderr_tx, &self.stdout_tx, &self.exit_tx) {
+            (false, _, None, None, None) => {
+                ps.set_stopped_by(StoppedBy::ExhaustedInput);
+            },
+            (true, None, _, _, _) => {
                 ps.set_stopped_by(StoppedBy::ExhaustedInput);
             },
             _ => {},

@@ -695,10 +695,10 @@ fn main() {
     let jjoin_handle: JoinHandle<Result<usize, CaughtProcessError>> = std::thread::spawn(move || {
 
         let mut loop_number: usize = 0;
-        let sinks_and_taps: HashSet<ControlIndex> = accounting.get_sinks()
+        let starts_and_ends: HashSet<ControlIndex> = accounting.get_ends()
             .into_iter()
             .fold(
-                accounting.get_taps().into_iter().collect::<HashSet<ControlIndex>>(),
+                accounting.get_ends().into_iter().collect::<HashSet<ControlIndex>>(),
                 |mut acc, item| {
                     acc.insert(item);
                     acc
@@ -707,7 +707,7 @@ fn main() {
 
         print!("CSV: {}", accounting.debug_header());
 
-        let mut currents: Vec<Option<(ProcessCount, ControlIndex)>> = accounting.get_taps()
+        let mut currents: Vec<Option<(ProcessCount, ControlIndex)>> = accounting.get_starts()
             .into_iter()
             .map(|tap_index| {
                 Some((CHANNEL_HIGH_WATERMARK, tap_index))
@@ -740,7 +740,8 @@ fn main() {
                                         })
                                     }
                                 };
-                                // println!("PS: {:?}", &process_status);
+                                // let control = accounting.get_control(*control_index);
+                                // println!("{:?} - {:?}", control, &process_status);
                                 // std::thread::sleep(Duration::from_millis(100));
                                 let csv_lines = accounting.update(
                                     &control_index,
@@ -769,7 +770,8 @@ fn main() {
                                 //     println!("FIN: {:?} {:?}", f, accounting.get_control(*f));
                                 // }
                                 std::thread::sleep(failed.till_clear());
-                                let should_exit = sinks_and_taps
+                                // println!("ST: {:?}", starts_and_ends);
+                                let should_exit = starts_and_ends
                                     .difference(&accounting.get_finished())
                                     .into_iter()
                                     .next()

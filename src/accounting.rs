@@ -270,7 +270,6 @@ impl<'a> AccountingBuilder {
     }
 }
 
-
 #[derive(Debug)]
 struct ControlIOReference {
     control_io_index: ControlIOIndex,
@@ -317,6 +316,7 @@ impl Accounting {
             Some(HashMap::new()),
             |acc, (k, v)| {
                 let (st, ci) = k;
+                println!("convert_processors: {:?}:{:?}: {:?}", &st, &ci, self.get_control_index(&st, &ci));
                 match (acc, self.get_control_index(&st, &ci)) {
                     (None, _) => None,
                     (_, None) => None,
@@ -466,30 +466,6 @@ impl Accounting {
         }
     }
 
-    fn get_of_type(&self, t: SpecType) -> Vec<ControlIndex> {
-        let mut r: Vec<ControlIndex> = vec![];
-        for index in 0..self.controls.len() {
-            match self.controls.get(index) {
-                Some(control) => {
-                    let (spec_type, _) = control.to_tuple_ref();
-                    if *spec_type == t {
-                        r.push(index);
-                    }
-                },
-                None => (),
-            }
-        }
-        r
-    }
-
-    pub fn get_sinks(&self) -> Vec<ControlIndex> {
-        self.get_of_type(SpecType::SinkSpec)
-    }
-
-    pub fn get_taps(&self) -> Vec<ControlIndex> {
-        self.get_of_type(SpecType::TapSpec)
-    }
-
     pub fn get_finished(&self) -> &HashSet<ControlIndex> {
         &self.finished
     }
@@ -539,16 +515,7 @@ impl Accounting {
         let mut csv_lines = Vec::with_capacity(ps.wrote_to.len() + ps.read_from.len());
 
         for (src_connection_id, count) in ps.wrote_to.iter() {
-            // let control = ControlIO(spec_type, control_id.to_owned(), *connection_id);
-            // csv_lines.push(self.debug_line(&control, count, AccountingOperation::Addition));
-            // match self.get_control_io_index(&spec_type, &control_id, connection_id) {
-            //     Some(index) => {
-            //         Accounting::update_stats(&mut self.leave, &index, count);
-            //     },
-            //     None => {
-            //         panic!("Accounting could not find ControlIOIndex for {:?}:{:?}:{:?}", &spec_type, &control_id, connection_id);
-            //     }
-            // }
+
             Accounting::update_total_stats(&mut self.total_size, true, count);
 
             let o_dst_control_io_ref = match self.destinations.get(control_index) {
@@ -631,10 +598,10 @@ impl Accounting {
             self.channel_low_watermark
         );
 
-        let mut taps = self.get_taps();
+        let mut starts = self.get_starts();
 
         if self.total_size < approx_desired_size {
-            let tap_index = taps.remove(self.fail_count % taps.len());
+            let tap_index = starts.remove(self.fail_count % starts.len());
             if !failed.contains(&tap_index) {
                 return Some((
                     self.channel_high_watermark - self.channel_low_watermark,
@@ -782,6 +749,18 @@ impl Accounting {
             }
         }
 
+    }
+
+    pub fn get_ends(&self) -> Vec<ControlIndex> {
+        let s: HashSet<ControlIndex> = self.sources.iter().map(|(ind, _v)| *ind).collect();
+        let e: HashSet<ControlIndex> = self.destinations.iter().map(|(ind, _v)| *ind).collect();
+        s.difference(&e).map(|x| *x).collect()
+    }
+
+    pub fn get_starts(&self) -> Vec<ControlIndex> {
+        let s: HashSet<ControlIndex> = self.sources.iter().map(|(ind, _v)| *ind).collect();
+        let e: HashSet<ControlIndex> = self.destinations.iter().map(|(ind, _v)| *ind).collect();
+        e.difference(&s).map(|x| *x).collect()
     }
 
     pub fn get_recommendation(&mut self, status: Option<AccountingStatus>, failed: &Failed) -> Option<(ProcessCount, ControlIndex)> {
@@ -943,6 +922,27 @@ fn test_accounting_buffers() {
     accounting.update(&cmd_control_index, &cmd1_ps);
 
 }
+
+
+#[test]
+fn test_find_starts() {
+
+    let mut accounting_builder = AccountingBuilder::new(5, 4, 3);
+    accounting_builder.add_join(ControlIO(SpecType::TapSpec, "TAP1".to_owned(), -1), ControlIO(SpecType::BufferSpec, "BUF1".to_owned(), 0));
+    accounting_builder.add_join(ControlIO(SpecType::BufferSpec, "BUF1".to_owned(), -1), ControlIO(SpecType::CommandSpec, "CMD1".to_owned(), 0));
+    let mut accounting = accounting_builder.build().unwrap();
+    println!("ACC: {:?}", accounting);
+
+
+    assert_eq!(
+        vec![Some(&Control(SpecType::TapSpec, "TAP1".to_owned()))],
+        accounting.get_starts()
+            .iter()
+            .map(|ci| accounting.get_control(*ci))
+            .collect::<Vec<Option<&Control>>>()
+    );
+}
+
 
 
 

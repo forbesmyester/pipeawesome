@@ -1,0 +1,9 @@
+{
+  "commands": [
+    { "name": "LS", "src": [], "spec": { "command": "ls", "args": ["-al"] } }
+  ],
+  "outputs": {
+    "OUTPUT": [ { "name": "LS", "port": "OUT" } ]
+  }
+}
+
