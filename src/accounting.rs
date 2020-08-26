@@ -76,6 +76,12 @@ impl<'a> AccountingBuilder {
         }
     }
 
+    pub fn add_control(&mut self, control: Control) {
+        if !self.controls.contains(&control) {
+            self.controls.push(control);
+        }
+    }
+
     pub fn add_join(&mut self, src: ControlIO, dst: ControlIO) {
 
         let (src_spec_type, src_control_id, src_connection_id) = src.to_tuple();
@@ -300,6 +306,17 @@ pub struct Accounting {
 }
 
 
+
+#[derive(Debug)]
+pub struct CouldNotConvertProcessorError (SpecType, ControlId);
+
+
+impl std::fmt::Display for CouldNotConvertProcessorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CouldNotConvertProcessorError: {:?}:{:?}", self.0, self.1)
+    }
+}
+
 impl Accounting {
 
     fn get_control_index<'b>(&self, st: &SpecType, ci: &ControlId) -> Option<usize> {
@@ -310,19 +327,18 @@ impl Accounting {
         self.controls.get(i)
     }
 
-    pub fn convert_processors(&self, by_spec_type_and_control_id: HashMap<(SpecType, ControlId), Box<dyn Processable + Send>>) -> Option<HashMap<ControlIndex, Box<dyn Processable + Send>>> {
+    pub fn convert_processors(&self, by_spec_type_and_control_id: HashMap<(SpecType, ControlId), Box<dyn Processable + Send>>) -> Result<HashMap<ControlIndex, Box<dyn Processable + Send>>, CouldNotConvertProcessorError> {
 
         by_spec_type_and_control_id.into_iter().fold(
-            Some(HashMap::new()),
+            Ok(HashMap::new()),
             |acc, (k, v)| {
                 let (st, ci) = k;
-                println!("convert_processors: {:?}:{:?}: {:?}", &st, &ci, self.get_control_index(&st, &ci));
                 match (acc, self.get_control_index(&st, &ci)) {
-                    (None, _) => None,
-                    (_, None) => None,
-                    (Some(mut a), Some(i)) => {
+                    (Err(x), _) => Err(x),
+                    (_, None) => Err(CouldNotConvertProcessorError(st, ci)),
+                    (Ok(mut a), Some(i)) => {
                         a.insert(i, v);
-                        Some(a)
+                        Ok(a)
                     }
                 }
             }

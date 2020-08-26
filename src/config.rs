@@ -1,14 +1,13 @@
 use std::ffi::{ OsStr };
-use petgraph::dot::Dot;
 use std::path::Path;
 use std::iter::IntoIterator;
 use std::cmp::{ Ord, Ordering };
-use std::collections::{ BTreeMap, HashMap, BTreeSet };
+use std::collections::{ BTreeMap, HashMap, BTreeSet }; // TODO: Can BTree* be replaced by Hash*
 use petgraph::stable_graph::{ StableGraph, NodeIndex };
 use petgraph::{ Direction };
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, PartialEq, Clone, Eq, PartialOrd)]
+#[derive(Debug, Deserialize, PartialEq, Clone, Eq, PartialOrd, Copy)]
 pub enum Port {
     OUT,
     ERR,
@@ -368,6 +367,8 @@ fn patch_edge_weights(mut graph: &mut TheGraph, nodes: &NodeMap, src: &str) {
 #[test]
 fn test_find_graph_nodes() {
 
+    use petgraph::dot::Dot;
+
     fn get_test_spec(cmd: &str) -> NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>
     {
         NativeLaunchSpec::new(
@@ -410,7 +411,7 @@ fn test_find_graph_nodes() {
         Source { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned(), port: Port::OUT },
     ]);
 
-    let mut spec = identify(lines, outputs);
+    let mut spec = identify(lines, outputs).unwrap();
 
     fn get_weight(graph: &TheGraph, nodes: &NodeMap, src: &str, dst: &str) -> Option<u32> {
         match graph.find_edge(nodes[src], nodes[dst]).map(|e| graph.edge_weight(e)).flatten() {
@@ -775,20 +776,59 @@ fn add_sinks(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, mut edge_id: &mu
 }
 
 
+#[derive(Debug)]
+pub enum IdentifyError {
+    UnconnectedNode(Vec<String>),
+    DuplicateIdentifier(String),
+}
 
-pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Specification<L> {
+
+impl std::fmt::Display for IdentifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            IdentifyError::DuplicateIdentifier(s) => {
+                write!(
+                    f,
+                    "IdentifyError: DuplicateIdentifier: There is more than one Command with the name '{}'",
+                    s
+                )
+            }
+            IdentifyError::UnconnectedNode(ss) => {
+                write!(
+                    f,
+                    "IdentifyError: UnconnectedNode: The Commands '{}' is not joined to anything",
+                    ss.join("', '")
+                )
+            }
+        }
+    }
+}
+
+
+pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Result<Specification<L>, IdentifyError> {
 
     let mut edge_id: u32 = 0;
     let mut nodes: NodeMap = HashMap::new();
     let mut graph: TheGraph = StableGraph::new();
 
+    let mut commands_seen: BTreeSet<&String> = BTreeSet::new();
+    let mut commands_with_no_src: BTreeSet<&String> = lines.iter()
+        .filter(|line| line.src.len() == 0)
+        .map(|line| &line.name)
+        .collect();
+
 
     for line in &lines {
+        if commands_seen.contains(&line.name) {
+            return Err(IdentifyError::DuplicateIdentifier(line.name.to_owned()));
+        }
+        commands_seen.insert(&line.name);
         let dst_target = Destination { spec_type: SpecType::CommandSpec, name: line.name.clone() };
         let dst_c = get_control_node_from_destination(&mut graph, &mut nodes, &dst_target);
-        let dst_p = get_port_node_from_destination(&mut graph, &mut nodes, &dst_target);
 
         for src in &line.src {
+            let dst_p = get_port_node_from_destination(&mut graph, &mut nodes, &dst_target);
+            commands_with_no_src.remove(&src.name);
             let src_c = get_control_node(&mut graph, &mut nodes, &src);
             let src_p = get_port_node(&mut graph, &mut nodes, &src);
 
@@ -803,6 +843,12 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Spec
         }
     }
 
+    if (commands_with_no_src.len() > 0) {
+        return Err(IdentifyError::UnconnectedNode(
+            commands_with_no_src.into_iter().map(|s| s.to_owned()).collect::<Vec<String>>()
+        ));
+    }
+
     add_sinks(&mut graph, &mut nodes, &mut edge_id, desired_sinks);
     let junction_spec_in = junction_spec_multi_out(&graph, &nodes, Direction::Incoming);
     add_junctions(&mut graph, &mut nodes, junction_spec_in, 0, &mut edge_id);
@@ -815,13 +861,118 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Spec
         patch_edge_weights(&mut graph, &nodes, &tap);
     }
 
-    Specification {
+    Ok(Specification {
         spec: get_builder_spec(&graph, &nodes, lines),
         graph,
         nodes,
-    }
+    })
 
 }
+
+#[test]
+fn test_identify_orphan_commands() {
+
+    use petgraph::dot::Dot;
+
+    let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
+        CommandDesire {
+            src: vec![],
+            spec: NativeLaunchSpec::new(
+                HashMap::new() as HashMap<String, String>,
+                ".".to_owned(),
+                "ls".to_owned(),
+                vec![]
+            ),
+            name: "LS".to_owned(),
+        },
+    ];
+
+    assert_eq!(
+        vec!["LS".to_owned()],
+        match identify(lines, BTreeMap::new()) {
+            Err(IdentifyError::UnconnectedNode(v)) => v,
+            _ => vec!["ZZZZZZZZZZZZZZ".to_owned()]
+        }
+    );
+
+}
+
+
+#[test]
+fn test_identify_duplicate_commands() {
+
+    use petgraph::dot::Dot;
+
+    let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
+        CommandDesire {
+            src: vec![],
+            spec: NativeLaunchSpec::new(
+                HashMap::new() as HashMap<String, String>,
+                ".".to_owned(),
+                "ls".to_owned(),
+                vec![]
+            ),
+            name: "LS".to_owned(),
+        },
+        CommandDesire {
+            src: vec![ Source { spec_type: SpecType::CommandSpec, name: "LS".to_owned(), port: Port::OUT } ],
+            spec: NativeLaunchSpec::new(
+                HashMap::new() as HashMap<String, String>,
+                ".".to_owned(),
+                "tee".to_owned(),
+                vec!["ls.txt".to_owned()]
+            ),
+            name: "LS".to_owned(),
+        },
+    ];
+
+    assert_eq!(
+        "LS".to_owned(),
+        match identify(lines, BTreeMap::new()) {
+            Err(IdentifyError::DuplicateIdentifier(v)) => v,
+            _ => "ZZZZZZZZZZZZZZ".to_owned()
+        }
+    );
+
+}
+
+
+#[test]
+fn test_identify_only_commands() {
+
+    use petgraph::dot::Dot;
+
+    let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
+        CommandDesire {
+            src: vec![],
+            spec: NativeLaunchSpec::new(
+                HashMap::new() as HashMap<String, String>,
+                ".".to_owned(),
+                "ls".to_owned(),
+                vec![]
+            ),
+            name: "LS".to_owned(),
+        },
+        CommandDesire {
+            src: vec![ Source { spec_type: SpecType::CommandSpec, name: "LS".to_owned(), port: Port::OUT } ],
+            spec: NativeLaunchSpec::new(
+                HashMap::new() as HashMap<String, String>,
+                ".".to_owned(),
+                "tee".to_owned(),
+                vec!["ls.txt".to_owned()]
+            ),
+            name: "TEE".to_owned(),
+        },
+    ];
+
+
+    let result = identify(lines, BTreeMap::new()).unwrap();
+    println!("{}", Dot::new(&result.graph));
+    assert_eq!(true, result.nodes.get("P#C#TEE#I").is_some());
+    assert_eq!(false, result.nodes.get("P#C#LS#I").is_some());
+
+}
+
 
 #[derive(Debug, Deserialize, PartialEq, Clone, Eq, PartialOrd)]
 pub struct JSONTarget {
@@ -980,6 +1131,8 @@ impl JSONConfig {
 #[test]
 fn test_identify() {
 
+    use petgraph::dot::Dot;
+
     fn get_test_spec(cmd: &str) -> NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>
     {
         NativeLaunchSpec::new(
@@ -1041,7 +1194,7 @@ fn test_identify() {
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
     expected.insert(Builder::TapSpec(TapSpec { name: "TAP".to_owned() }));
 
-    let result = identify(lines, outputs);
+    let result = identify(lines, outputs).unwrap();
 
     println!("{}", Dot::new(&result.graph));
     assert_eq!(expected, result.spec);
@@ -1105,7 +1258,7 @@ fn test_identify_loop() {
         Source { spec_type: SpecType::CommandSpec, name: "GOOD".to_owned(), port: Port::OUT },
     ]);
 
-    let result = identify(lines, outputs);
+    let result = identify(lines, outputs).unwrap();
 
 
     let mut expected: BTreeSet<Builder<JSONLaunchSpec>> = BTreeSet::new();

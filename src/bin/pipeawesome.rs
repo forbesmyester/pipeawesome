@@ -29,6 +29,7 @@ const CHANNEL_SIZE: usize = 16;
 const CHANNEL_LOW_WATERMARK: usize = 4;
 const CHANNEL_HIGH_WATERMARK: usize = 8;
 
+
 #[derive(Debug)]
 pub enum ConstructionError {
     UnallocatedProgramInOutError(ProgramInOut),
@@ -317,6 +318,24 @@ struct Controls {
     sink_file: HashMap<String, Sink<FileGetWrite<String>>>,
 }
 
+enum JoinError{
+    Destination(SpecType, ControlId),
+    Source(SpecType, ControlId, Port),
+}
+
+impl std::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            JoinError::Destination(s, c) => {
+                write!(f, "JoinError: Destination: {:?}:{:?}", s, c)
+            }
+            JoinError::Source(s, c, p) => {
+                write!(f, "JoinError: Source: {:?}:{:?}:{:?}", s, c, p)
+            }
+        }
+    }
+}
+
 
 impl Controls {
 
@@ -382,63 +401,63 @@ impl Controls {
         r
     }
 
-    fn get_output_rx(&mut self, name: &str, port: &Port) -> Option<Connected> {
-        let src: &mut dyn InputOutput = self.get_mut(name)?;
+    fn get_output_rx(&mut self, spec_type: SpecType, name: &str, port: &Port) -> Option<Connected> {
+        let src: &mut dyn InputOutput = self.get_mut(spec_type, name)?;
         src.get_output(port, CHANNEL_SIZE).ok()
     }
 
 
-    fn set_input(&mut self, name: &str, priority: u32, input: Receiver<Line>) -> Option<ConnectionId> {
-        let dst: &mut dyn InputOutput = self.get_mut(name)?;
+    fn set_input(&mut self, spec_type: SpecType, name: &str, priority: u32, input: Receiver<Line>) -> Option<ConnectionId> {
+        let dst: &mut dyn InputOutput = self.get_mut(spec_type, name)?;
         dst.add_input(priority, input).ok()
     }
 
 
-    fn join(&mut self, j: &JoinSpec) -> Option<(ConnectionId, ConnectionId)> {
-        match self.get_output_rx(&j.src.name, &j.src.port) {
+    fn join(&mut self, j: &JoinSpec) -> Result<(ConnectionId, ConnectionId), JoinError> {
+        match self.get_output_rx(j.src.spec_type, &j.src.name, &j.src.port) {
             Some(connected) => {
-                match self.set_input(&j.dst.name, j.priority, connected.0) {
-                    Some(c2) => Some((connected.1, c2)),
-                    None => None,
+                match self.set_input(j.dst.spec_type, &j.dst.name, j.priority, connected.0) {
+                    Some(c2) => Ok((connected.1, c2)),
+                    None => Err(JoinError::Destination(j.dst.spec_type, j.dst.name.to_owned()))
                 }
             },
-            None => None,
+            None => Err(JoinError::Source(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
         }
     }
 
 
-    fn get_mut(&mut self, name: &str) -> Option<&mut dyn InputOutput> {
-        match self.tap_file.get_mut(name) {
-            None => (),
-            Some(t) => { return Some(t); }
+    fn get_mut(&mut self, spec_type: SpecType, name: &str) -> Option<&mut dyn InputOutput> {
+        match (spec_type, self.tap_file.get_mut(name)) {
+            (SpecType::TapSpec, Some(t)) => { return Some(t); }
+            _ => (),
         }
-        match self.tap_stdin.get_mut(name) {
-            None => (),
-            Some(t) => { return Some(t); }
+        match (spec_type, self.tap_stdin.get_mut(name)) {
+            (SpecType::TapSpec, Some(t)) => { return Some(t); }
+            _ => (),
         }
-        match self.junctions.get_mut(name) {
-            None => (),
-            Some(j) => { return Some(j); }
+        match (spec_type, self.junctions.get_mut(name)) {
+            (SpecType::JunctionSpec, Some(j)) => { return Some(j); }
+            _ => (),
         }
-        match self.buffers.get_mut(name) {
-            None => (),
-            Some(b) => { return Some(b); }
+        match (spec_type, self.buffers.get_mut(name)) {
+            (SpecType::BufferSpec, Some(b)) => { return Some(b); }
+            _ => (),
         }
-        match self.commands.get_mut(name) {
-            None => (),
-            Some(c) => { return Some(c); }
+        match (spec_type, self.commands.get_mut(name)) {
+            (SpecType::CommandSpec, Some(c)) => { return Some(c); }
+            _ => (),
         }
-        match self.sink_stdout.get_mut(name) {
-            None => (),
-            Some(s) => { return Some(s); }
+        match (spec_type, self.sink_stdout.get_mut(name)) {
+            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
+            _ => (),
         }
-        match self.sink_stderr.get_mut(name) {
-            None => (),
-            Some(s) => { return Some(s); }
+        match (spec_type, self.sink_stderr.get_mut(name)) {
+            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
+            _ => (),
         }
-        match self.sink_file.get_mut(name) {
-            None => (),
-            Some(s) => { return Some(s); }
+        match (spec_type, self.sink_file.get_mut(name)) {
+            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
+            _ => (),
         }
         None
     }
@@ -617,7 +636,6 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
 
 fn main() {
 
-
     let opts = get_opts();
 
     if opts.debug > 0 {
@@ -626,7 +644,15 @@ fn main() {
 
     let json_config = fix_config(Path::new(&opts.pipeline));
     let config = json_config.to_config();
-    let mut identified = identify(config.commands, config.outputs);
+
+    let mut identified = match identify(config.commands, config.outputs) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
     if opts.graph {
         let taps = find_graph_taps(&identified.graph);
         for t in taps {
@@ -652,17 +678,18 @@ fn main() {
         CHANNEL_LOW_WATERMARK
     );
 
+    // println!("B: {:?}", builders);
     for b in builders {
         match b {
             Builder::JoinSpec(j) => {
                 match controls.join(&j) {
-                    Some((c1, c2)) => {
+                    Ok((c1, c2)) => {
                         accounting_builder.add_join(
                             ControlIO(j.src.spec_type, j.src.name, c1),
                             ControlIO(j.dst.spec_type, j.dst.name, c2)
                         );
                     },
-                    None => { panic!("Joining {:?} caused error", &j); }
+                    Err(e) => { panic!("{}", &e); }
                 }
             }
             _ => (),
@@ -679,9 +706,9 @@ fn main() {
 
     let mut accounting = option_accounting.unwrap();
     let mut processors = match accounting.convert_processors(raw_processors) {
-        Some(p) => p,
-        None => {
-            eprintln!("Could not convert processors from (`spec_type`, `control_id`) to `control_index`");
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     };
