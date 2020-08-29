@@ -23,15 +23,22 @@
       "src": [
         { "name": "INPUT", "port": "OUT" }
       ],
-      "spec": { "command": "sed", "args": [ "-u", "s/^\\([0-9]\\+\\).*/REQUIRE: \\1/" ] }
+      "spec": { "command": "sed", "args": [ "-u", "s/^\\([0-9]\\+\\).*/REQUIRE: ITEM: \\1/" ] }
+    },
+    {
+      "name": "ADD_REQUIRE_MARK_END",
+      "src": [
+        { "name": "ADD_REQUIRE", "port": "OUT" }
+      ],
+      "spec": { "command": "sed", "args": [ "$aREQUIRE: END: " ] }
     },
     {
       "name": "TERMINATOR",
       "src": [
-        { "name": "ADD_REQUIRE", "port": "OUT" },
+        { "name": "ADD_REQUIRE_MARK_END", "port": "OUT" },
         { "name": "GOOD", "port": "OUT" }
       ],
-      "spec": { "command": "./target/debug/pipeawesome-terminator", "args": [ "-g", "5", "-r", "REQUIRE: ", "-l", "^0*([^:]+).*", "-p", "$1" ] }
+      "spec": { "command": "./target/debug/pipeawesome-terminator", "args": [ "-g", "5", "-e", "REQUIRE: END", "-r", "REQUIRE: ITEM: ", "-l", "^0*([^:]+).*", "-p", "$1" ] }
     },
     {
       "name": "BAD",
@@ -45,9 +52,15 @@
       "name": "ADD_LEADING_ZERO",
       "src": [ { "name": "BAD", "port": "OUT" } ],
       "spec": { "command": "sed", "args": [ "-u", "s/^/0/" ] }
+    },
+    {
+      "name": "SORT",
+      "src": [ { "name": "TERMINATOR", "port": "OUT" } ],
+      "spec": { "command": "sort", "args": [] }
     }
+
   ],
   "outputs": {
-    "OUTPUT": [ { "name": "TERMINATOR", "port": "OUT" } ]
+    "OUTPUT": [ { "name": "SORT", "port": "OUT" } ]
   }
 }
