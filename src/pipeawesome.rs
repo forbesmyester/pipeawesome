@@ -1,14 +1,9 @@
-#[path = "../controls.rs"]
-mod controls;
-
-#[path = "../config.rs"]
-mod config;
-
-#[path = "../accounting.rs"]
-mod accounting;
-
-#[path = "../failed.rs"]
-mod failed;
+// mod controls;
+// mod config;
+// mod accounting;
+// mod accounting_writer;
+// mod failed;
+// mod stdin_out;
 
 use std::thread::JoinHandle;
 use std::collections::HashSet;
@@ -20,10 +15,12 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 
-use crate::accounting::*;
-use crate::failed::*;
-use crate::controls::*;
-use crate::config::*;
+use pipeawesome::accounting::*;
+use pipeawesome::accounting_writer::*;
+use pipeawesome::failed::*;
+use pipeawesome::controls::*;
+use pipeawesome::config::*;
+use pipeawesome::stdin_out::{ FileGetRead, FileGetWrite, SinkMethod, TapMethod, StdinGetRead, StderrGetWrite, StdoutGetWrite };
 
 const CHANNEL_SIZE: usize = 16;
 const CHANNEL_LOW_WATERMARK: usize = 4;
@@ -73,7 +70,7 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
             }
         };
 
-        if incoming.len() == 0 {
+        if incoming.is_empty() {
             return outgoing;
         }
 
@@ -99,7 +96,7 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
                 todo.push(ta);
             }
         }
-        i = i + 1;
+        i += 1;
     }
 
 }
@@ -127,7 +124,6 @@ fn test_strip_ports_from_graph() {
     ]);
 
     strip_ports_from_graph(&mut graph, faucet);
-    println!("{}", Dot::new(&graph));
     assert_eq!((3, 2), (graph.node_count(), graph.edge_count()));
 
 }
@@ -172,25 +168,12 @@ fn test_find_graph_taps() {
 
 
 #[derive(Debug)]
-enum TapMethod {
-    STDIN,
-    FILENAME(String)
-}
-
-#[derive(Debug)]
-enum SinkMethod {
-    STDOUT,
-    STDERR,
-    FILENAME(String)
-}
-
-
-#[derive(Debug)]
 struct Opts {
     debug: u64,
     pipeline: String,
     tap: HashMap<String, TapMethod>,
     sink: HashMap<String, SinkMethod>,
+    accounting: Option<SinkMethod>,
     graph: bool,
 }
 
@@ -230,8 +213,15 @@ fn get_opts() -> Opts {
             .multiple(true)
             .value_name("SINK")
         )
+        .arg(ClapArg::with_name("accounting")
+            .help("Where to write statistics about what is happening")
+            .takes_value(true)
+            .short("a")
+            .long("accounting")
+            .value_name("ACCOUNTING")
+        )
         .arg(ClapArg::with_name("debug")
-            .short("v")
+            .long("debug")
             .multiple(true)
             .help("Sets the level of debug")
         ).get_matches();
@@ -246,7 +236,7 @@ fn get_opts() -> Opts {
             Some(vs) => {
                 let mut hm: HashMap<String, TapMethod> = HashMap::new();
                 for v in vs {
-                    let chunks:Vec<_> = v.splitn(2, "=").collect();
+                    let chunks:Vec<_> = v.splitn(2, '=').collect();
                     match chunks.as_slice() {
                         [k, "-"] => hm.insert(k.to_string(), TapMethod::STDIN),
                         [k, v] => hm.insert(k.to_string(), TapMethod::FILENAME(v.to_string())),
@@ -268,7 +258,7 @@ fn get_opts() -> Opts {
             Some(vs) => {
                 let mut hm: HashMap<String, SinkMethod> = HashMap::new();
                 for v in vs {
-                    let chunks:Vec<_> = v.splitn(2, "=").collect();
+                    let chunks:Vec<_> = v.splitn(2, '=').collect();
                     match chunks.as_slice() {
                         [k, "-"] => hm.insert(k.to_string(), SinkMethod::STDOUT),
                         [k, "_"] => hm.insert(k.to_string(), SinkMethod::STDERR),
@@ -279,6 +269,12 @@ fn get_opts() -> Opts {
                 }
                 hm
             }
+        },
+        accounting: match matches.value_of("accounting") {
+            Some("-") => Some(SinkMethod::STDOUT),
+            Some("_") => Some(SinkMethod::STDERR),
+            Some(x) if !x.is_empty() => Some(SinkMethod::FILENAME(x.to_string())),
+            _ => None,
         }
     }
 
@@ -306,13 +302,14 @@ fn fix_config(filename: &Path) -> JSONConfig {
     jc
 }
 
+type CommandString = Command<HashMap<String, String>, Vec<String>, String, String, String, String>;
 
 struct Controls {
     tap_file: HashMap<String, Tap<FileGetRead<String>>>,
     tap_stdin: HashMap<String, Tap<StdinGetRead>>,
     junctions: HashMap<String, Junction>,
     buffers: HashMap<String, Buffer>,
-    commands: HashMap<String, Command<HashMap<String, String>, Vec<String>, String, String, String, String>>,
+    commands: HashMap<String, CommandString>,
     sink_stdout: HashMap<String, Sink<StdoutGetWrite>>,
     sink_stderr: HashMap<String, Sink<StderrGetWrite>>,
     sink_file: HashMap<String, Sink<FileGetWrite<String>>>,
@@ -340,62 +337,39 @@ impl std::fmt::Display for JoinError {
 impl Controls {
 
     fn get_processors(&mut self) -> HashMap<(SpecType, ControlId), Box<dyn Processable + Send>> {
+
         let mut r: HashMap<(SpecType, ControlId), Box<dyn Processable + Send>> = HashMap::new();
 
         for (k, mut v) in self.tap_file.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::TapSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::TapSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.tap_stdin.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::TapSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::TapSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.junctions.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::JunctionSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::JunctionSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.buffers.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::BufferSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::BufferSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.commands.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::CommandSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::CommandSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.sink_stdout.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.sink_stderr.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
         }
 
         for (k, mut v) in self.sink_file.drain() {
-            match v.get_processor().ok() {
-                Some(p) => { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
-                None => (),
-            }
+            if let Ok(p) = v.get_processor() { r.insert((SpecType::SinkSpec, k), Box::new(p)); }
         }
 
         r
@@ -427,88 +401,34 @@ impl Controls {
 
 
     fn get_mut(&mut self, spec_type: SpecType, name: &str) -> Option<&mut dyn InputOutput> {
-        match (spec_type, self.tap_file.get_mut(name)) {
-            (SpecType::TapSpec, Some(t)) => { return Some(t); }
-            _ => (),
+        if let (SpecType::TapSpec, Some(t)) = (spec_type, self.tap_file.get_mut(name)) {
+            return Some(t);
         }
-        match (spec_type, self.tap_stdin.get_mut(name)) {
-            (SpecType::TapSpec, Some(t)) => { return Some(t); }
-            _ => (),
+        if let (SpecType::TapSpec, Some(t)) = (spec_type, self.tap_stdin.get_mut(name)) {
+            return Some(t);
         }
-        match (spec_type, self.junctions.get_mut(name)) {
-            (SpecType::JunctionSpec, Some(j)) => { return Some(j); }
-            _ => (),
+        if let (SpecType::JunctionSpec, Some(j)) = (spec_type, self.junctions.get_mut(name)) {
+            return Some(j);
         }
-        match (spec_type, self.buffers.get_mut(name)) {
-            (SpecType::BufferSpec, Some(b)) => { return Some(b); }
-            _ => (),
+        if let (SpecType::BufferSpec, Some(b)) = (spec_type, self.buffers.get_mut(name)) {
+            return Some(b);
         }
-        match (spec_type, self.commands.get_mut(name)) {
-            (SpecType::CommandSpec, Some(c)) => { return Some(c); }
-            _ => (),
+        if let (SpecType::CommandSpec, Some(c)) = (spec_type, self.commands.get_mut(name)) {
+            return Some(c);
         }
-        match (spec_type, self.sink_stdout.get_mut(name)) {
-            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
-            _ => (),
+        if let (SpecType::SinkSpec, Some(s)) = (spec_type, self.sink_stdout.get_mut(name)) {
+            return Some(s);
         }
-        match (spec_type, self.sink_stderr.get_mut(name)) {
-            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
-            _ => (),
+        if let (SpecType::SinkSpec, Some(s)) = (spec_type, self.sink_stderr.get_mut(name)) {
+            return Some(s);
         }
-        match (spec_type, self.sink_file.get_mut(name)) {
-            (SpecType::SinkSpec, Some(s)) => { return Some(s); }
-            _ => (),
+        if let (SpecType::SinkSpec, Some(s)) = (spec_type, self.sink_file.get_mut(name)) {
+            return Some(s);
         }
         None
     }
 }
 
-struct StdinGetRead {}
-
-impl GetRead for StdinGetRead {
-    type R = std::io::Stdin;
-    fn get_read(&self) -> std::io::Stdin {
-        std::io::stdin()
-    }
-}
-
-struct FileGetRead<P> where P: AsRef<std::path::Path> {
-    p: P,
-}
-
-impl <P> GetRead for FileGetRead<P> where P: AsRef<std::path::Path> {
-    type R = std::fs::File;
-    fn get_read(&self) -> std::fs::File {
-        std::fs::File::open(&self.p).unwrap()
-    }
-}
-
-struct StdoutGetWrite {}
-impl GetWrite for StdoutGetWrite {
-    type W = std::io::Stdout;
-    fn get_write(&self) -> std::io::Stdout {
-        std::io::stdout()
-    }
-}
-
-struct StderrGetWrite {}
-impl GetWrite for StderrGetWrite {
-    type W = std::io::Stderr;
-    fn get_write(&self) -> std::io::Stderr {
-        std::io::stderr()
-    }
-}
-
-struct FileGetWrite<P> where P: AsRef<std::path::Path> {
-    p: P,
-}
-
-impl <P> GetWrite for FileGetWrite<P> where P: AsRef<std::path::Path> {
-    type W = std::fs::File;
-    fn get_write(&self) -> std::fs::File {
-        std::fs::File::create(&self.p).unwrap()
-    }
-}
 
 #[derive(Debug)]
 pub struct ProgramInOut {
@@ -537,7 +457,7 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
                     Some(TapMethod::FILENAME(s)) => {
                         controls.tap_file.insert(
                             t.name,
-                            Tap::new(FileGetRead { p: s })
+                            Tap::new(FileGetRead::new(s))
                         );
                         None
                     },
@@ -600,7 +520,7 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
                     Some(SinkMethod::FILENAME(filename)) => {
                         controls.sink_file.insert(
                             s.name.to_owned(),
-                            Sink::new(FileGetWrite { p: filename })
+                            Sink::new(FileGetWrite::new(filename))
                         );
                         None
                     }
@@ -608,9 +528,8 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
             },
             Builder::JoinSpec(j) => Some(Builder::JoinSpec(j)),
         };
-        match re_add {
-            Some(x) => { builders.push(x); },
-            None => (),
+        if let Some(x) = re_add {
+            builders.push(x);
         }
     }
 
@@ -626,13 +545,37 @@ fn construct(mut program_in_out: ProgramInOut, builders: &mut Vec<Builder<JSONLa
         }
     }
 
-    if (program_in_out.sinks.len() > 0) || (program_in_out.taps.len() > 0) {
+    if (!program_in_out.sinks.is_empty()) || (!program_in_out.taps.is_empty()) {
         return Err(ConstructionError::UnallocatedProgramInOutError(program_in_out));
     }
 
     Ok(controls)
 
 }
+
+
+    struct CaughtProcessError {
+        process_error: ProcessError,
+        spec_type: Option<SpecType>,
+        control_id: Option<ControlId>,
+    }
+
+    enum WorkerError {
+        CaughtProcessError(CaughtProcessError),
+        AccountingWriterError(AccountingWriterError),
+    }
+
+    impl From<CaughtProcessError> for WorkerError {
+        fn from(cpe: CaughtProcessError) -> WorkerError {
+            WorkerError::CaughtProcessError(cpe)
+        }
+    }
+
+    impl From<AccountingWriterError> for WorkerError {
+        fn from(aw: AccountingWriterError) -> WorkerError {
+            WorkerError::AccountingWriterError(aw)
+        }
+    }
 
 fn main() {
 
@@ -643,7 +586,7 @@ fn main() {
     }
 
     let json_config = fix_config(Path::new(&opts.pipeline));
-    let config = json_config.to_config();
+    let config = json_config.convert_to_config();
 
     let mut identified = match identify(config.commands, config.outputs) {
         Ok(x) => x,
@@ -678,21 +621,28 @@ fn main() {
         CHANNEL_LOW_WATERMARK
     );
 
+    let mut join_log: Vec<AccountingWriterJoinLogItem> = vec![];
+
     // println!("B: {:?}", builders);
     for b in builders {
-        match b {
-            Builder::JoinSpec(j) => {
-                match controls.join(&j) {
-                    Ok((c1, c2)) => {
-                        accounting_builder.add_join(
-                            ControlIO(j.src.spec_type, j.src.name, c1),
-                            ControlIO(j.dst.spec_type, j.dst.name, c2)
-                        );
-                    },
-                    Err(e) => { panic!("{}", &e); }
-                }
+        if let Builder::JoinSpec(j) = b {
+            match controls.join(&j) {
+                Ok((c1, c2)) => {
+                    join_log.push(AccountingWriterJoinLogItem {
+                        src_spec_type: j.src.spec_type,
+                        src_control_id: j.src.name.clone(),
+                        src_connection_id: c1,
+                        dst_spec_type: j.dst.spec_type,
+                        dst_control_id: j.dst.name.clone(),
+                        dst_connection_id: c2,
+                    });
+                    accounting_builder.add_join(
+                        ControlIO(j.src.spec_type, j.src.name, c1),
+                        ControlIO(j.dst.spec_type, j.dst.name, c2)
+                    );
+                },
+                Err(e) => { panic!("{}", &e); }
             }
-            _ => (),
         };
     }
 
@@ -713,15 +663,16 @@ fn main() {
         }
     };
 
-    struct CaughtProcessError {
-        process_error: ProcessError,
-        spec_type: Option<SpecType>,
-        control_id: Option<ControlId>,
-    }
+    let accounting_pref = opts.accounting;
 
-    let jjoin_handle: JoinHandle<Result<usize, CaughtProcessError>> = std::thread::spawn(move || {
+    let jjoin_handle: JoinHandle<Result<usize, WorkerError>> = std::thread::spawn(move || {
 
-        let mut loop_number: usize = 0;
+        let mut accounting_writer = AccountingWriter::new(accounting_pref);
+
+        for jl in join_log {
+            accounting_writer.write_join(jl)?;
+        }
+
         let starts_and_ends: HashSet<ControlIndex> = accounting.get_ends()
             .into_iter()
             .fold(
@@ -732,8 +683,6 @@ fn main() {
                 }
             );
 
-        print!("CSV: {}", accounting.debug_header());
-
         let mut currents: Vec<Option<(ProcessCount, ControlIndex)>> = accounting.get_starts()
             .into_iter()
             .map(|tap_index| {
@@ -742,99 +691,58 @@ fn main() {
             .collect();
 
         let mut failed: Failed = Failed::new(100);
+        accounting_writer.document_control_indices(&accounting, processors.iter().map(|(i, _)| *i).collect())?;
         loop {
-            loop_number = loop_number + 1;
 
-            // println!("CURRENTS: {:?}", currents);
-            // println!("PIPE:     {:?}", &accounting.pipe_size);
             for current in &mut currents {
-                match current {
-                    Some((count, control_index)) => {
 
-                        let next_status = match processors.get_mut(control_index) {
-                            None => None,
-                            Some(processor) => {
-                                // TODO: Remove unwrap
-                                // println!("C: {:?}", accounting.get_control(*control_index));
-                                let process_status = match processor.process(*count) {
-                                    Ok(ps) => ps,
-                                    Err(e) => {
-                                        let control = accounting.get_control(*control_index);
-                                        return Err(CaughtProcessError {
-                                            process_error: e,
-                                            spec_type: control.map(|c| c.0),
-                                            control_id: control.map(|c| c.1.to_owned()),
-                                        })
-                                    }
-                                };
-                                // let control = accounting.get_control(*control_index);
-                                // println!("{:?} - {:?}", control, &process_status);
-                                // std::thread::sleep(Duration::from_millis(100));
-                                let csv_lines = accounting.update(
-                                    &control_index,
-                                    &process_status
-                                );
-                                // for line in csv_lines {
-                                //     print!("CSV: {}", line);
-                                // }
-                                Accounting::update_failed(&control_index, &process_status, &mut failed);
-                                let next_status = accounting.get_accounting_status(&control_index, process_status);
-                                Some(next_status)
+                let augment_with_processor: Option<(usize, usize, &mut Box<dyn Processable + std::marker::Send>)> = current
+                    .and_then(|(count, control_index)| {
+                        processors.get_mut(&control_index).map(|p| Some((count, control_index, p)))
+                    })
+                    .flatten();
+
+                let next_status = match augment_with_processor {
+                    Some((count, control_index, processor)) => {
+                        let process_status: ProcessStatus = match processor.process(count) {
+                            Ok(ps) => ps,
+                            Err(e) => {
+                                let control = accounting.get_control(control_index);
+                                return Err(WorkerError::CaughtProcessError(CaughtProcessError {
+                                    process_error: e,
+                                    spec_type: control.map(|c| c.0),
+                                    control_id: control.map(|c| c.1.to_owned()),
+                                }));
                             }
                         };
-
-                        let rec = accounting.get_recommendation(next_status, &mut failed);
-
-                        match rec {
-                            Some((rec_read_count, rec_control_index)) => {
-                                *count = rec_read_count;
-                                *control_index = rec_control_index;
-                                // *current = Some((read_count, (next_spec_type, next_control_id), tap_id));
-                            }
-                            None => {
-                                // println!("===================");
-                                // for f in accounting.get_finished() {
-                                //     println!("FIN: {:?} {:?}", f, accounting.get_control(*f));
-                                // }
-                                std::thread::sleep(failed.till_clear());
-                                // println!("ST: {:?}", starts_and_ends);
-                                let should_exit = starts_and_ends
-                                    .difference(&accounting.get_finished())
-                                    .into_iter()
-                                    .next()
-                                    .is_none();
-                                if should_exit {
-                                    return Ok(0 as usize)
-                                }
-                            }
-                        }
-
-
+                        accounting_writer.document_process_status(control_index, &process_status)?;
+                        accounting.update(&control_index, &process_status);
+                        Accounting::update_failed(&control_index, &process_status, &mut failed);
+                        let next_status = accounting.get_accounting_status(&control_index, process_status);
+                        Some(next_status)
                     },
-                    None => (),
-                }
-            };
+                    None => None,
+                };
 
+                match (accounting.get_recommendation(next_status, &failed), current) {
+                    (Some((rec_read_count, rec_control_index)), Some((count, control_index))) => {
+                        *count = rec_read_count;
+                        *control_index = rec_control_index;
+                    },
+                    _ => {
+                        let should_exit = starts_and_ends
+                            .difference(&accounting.get_finished())
+                            .next()
+                            .is_none();
+                        if should_exit {
+                            return Ok(0 as usize)
+                        }
+                        std::thread::sleep(failed.till_clear());
+                    }
+                };
 
+            }
         }
-
-        // for (pair, proc) in &mut processors {
-        //     let (spec_type, name) = pair;
-        //     let process_result = proc.process();
-        //     let accounting_return = accounting.update(spec_type.to_owned(), name.to_string(), process_result);
-        //     // println!("PR: ({:?}, {:?}) = {:?}", spec_type, name, process_result);
-        //     // println!("AC: {:?}", accounting.destinations);
-        // }
-
-        // if debug && ((loop_number % 10000) == 0) {
-        // std::thread::sleep(std::time::Duration::from_millis(10));
-        // }
-        //     eprintln!("=============================================================== {}", loop_number);
-        //     eprintln!("ACCOUNTING: SIZE: {:?}", accounting.pipe_size);
-        //     // eprintln!("ACCOUNTING: INCOMING: {:?}", accounting.enter);
-        //     // eprintln!("ACCOUNTING: OUTGOING: {:?}", accounting.leave);
-        //     std::thread::sleep(std::time::Duration::from_millis(10));
-        // println!("LOOP: {}", loop_number);
 
     });
 
@@ -846,13 +754,17 @@ fn main() {
         },
         Ok(joined) => {
             match joined {
-                Err(e) => {
-                        eprintln!(
-                            "Control {:?}:{:?} encountered error {}",
-                            e.spec_type,
-                            e.control_id,
-                            e.process_error
-                        );
+                Err(WorkerError::AccountingWriterError(e)) => {
+                    eprintln!("Error writing accounting data {:?}", e);
+                    std::process::exit(1);
+                }
+                Err(WorkerError::CaughtProcessError(e)) => {
+                    eprintln!(
+                        "Control {:?}:{:?} encountered error {}",
+                        e.spec_type,
+                        e.control_id,
+                        e.process_error
+                    );
                     std::process::exit(1);
                 }
                 Ok(_) => (),

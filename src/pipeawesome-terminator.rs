@@ -139,7 +139,7 @@ fn main() {
     loop {
         let time_since = Instant::now().duration_since(last_data);
         if
-            (requirements.len() == 0) &&
+            requirements.is_empty() &&
             (require_end_seen || (time_since.as_secs() > opts.grace_period))
         {
             std::process::exit(0);
@@ -185,13 +185,10 @@ fn main() {
                         requirements.remove(&x.to_string());
                     }
                 }
-                match remove_from {
-                    Some(rf) => {
-                        for _i in 0..rf {
-                            seen.remove(0);
-                        }
+                if let Some(rf) = remove_from {
+                    for _i in 0..rf {
+                        seen.remove(0);
                     }
-                    None => ()
                 }
                 last_data = std::time::Instant::now();
             },

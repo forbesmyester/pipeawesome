@@ -5,7 +5,12 @@ use std::io::Write;
 use std::path::Path;
 use std::ffi::OsStr;
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError, TryRecvError, Receiver};
+extern crate serde_json;
+use serde::{Serialize as Serialize};
 
+// #[path = "./stdin_out.rs"]
+// mod stdin_out;
+use crate::stdin_out::*;
 
 use crate::config::Port;
 
@@ -15,16 +20,6 @@ const BUFWRITER_CAPACITY: usize = 40;
 const INTERNAL_SYNC_CHANNEL_SIZE: usize = 1024;
 
 pub type Line = Option<String>;
-
-pub trait GetRead {
-    type R: std::io::Read;
-    fn get_read(&self) -> Self::R;
-}
-
-pub trait GetWrite {
-    type W: std::io::Write;
-    fn get_write(&self) -> Self::W;
-}
 
 pub type ProcessCount = usize;
 
@@ -100,10 +95,7 @@ impl std::fmt::Display for ProcessorAlreadyUsedError {
 
 fn do_sync_send(tx: &SyncSender<Line>, msg: &Option<String>) {
     loop {
-        match tx.send(msg.clone()) {
-            Ok(_) => return (),
-            Err(_) => (),
-        }
+        if tx.send(msg.clone()).is_ok() { return; }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -116,14 +108,16 @@ pub struct Buffer {
 
 impl Buffer {
 
-    pub fn new() -> Buffer {
-        Buffer {
-            tx: None,
-            rx: None,
-        }
-    }
+    pub fn new() -> Buffer { Buffer { ..Default::default() } }
 
 }
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Buffer { tx: None, rx: None }
+    }
+}
+
 
 impl InputOutput for Buffer {
 
@@ -136,7 +130,7 @@ impl InputOutput for Buffer {
                 self.tx = Some(tx);
                 Ok(Connected(rx, -1))
             },
-            _ => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
+            _ => Err(CannotAllocateOutputError::CannotAllocateOutputError),
         }
 
     }
@@ -188,7 +182,7 @@ impl Processable for BufferProcessor {
 
         for _i in 0..desired_count {
 
-            if self.b.len() == 0 {
+            if self.b.is_empty() {
                 match self.rx.try_recv() {
                     Ok(None) => {
                         self.b.insert(0, None);
@@ -263,9 +257,8 @@ impl <R: GetRead + Send> InputOutput for Tap<R> {
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
-        match s {
-            Port::ERR => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
-            _ => (),
+        if let Port::ERR = s {
+            return Err(CannotAllocateOutputError::CannotAllocateOutputError);
         }
 
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
@@ -310,10 +303,11 @@ pub struct TapProcessor<R> {
 impl <R: 'static +  GetRead + Send> TapProcessor<R> {
 
     fn new(get_buf: R, tx: SyncSender<Line>) -> TapProcessor<R> {
+        #![allow(clippy::type_complexity)]
         let (int_tx, int_rx): (SyncSender<Result<Line, ProcessError>>, Receiver<Result<Line, ProcessError>>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
         let mut t = TapProcessor {
             get_buf: Some(get_buf),
-            tx: tx,
+            tx,
             pending: None,
             jh: None,
             int_tx: Some(int_tx),
@@ -333,7 +327,7 @@ impl <R: 'static +  GetRead + Send> TapProcessor<R> {
                 let mut xx = msg;
                 loop {
                     match tx.try_send(xx) {
-                        Ok(_) => { return (); },
+                        Ok(_) => { return; },
                         Err(TrySendError::Full(x)) => { xx = x; }
                         Err(TrySendError::Disconnected(x)) => { xx = x; }
                     }
@@ -355,22 +349,16 @@ impl <R: 'static +  GetRead + Send> TapProcessor<R> {
             }
         }
 
-        match (std::mem::take(&mut self.get_buf), std::mem::take(&mut self.int_tx)) {
-
-            (Some(get_buf), Some(int_tx)) => {
-                std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
-                    let r: &mut dyn std::io::Read = &mut get_buf.get_read();
-                    let mut buf = std::io::BufReader::with_capacity(BUFREADER_CAPACITY, r);
-                    loop {
-                        if !command_read_std(&mut buf, &int_tx) {
-                            break;
-                        }
+        if let (Some(get_buf), Some(int_tx)) = (std::mem::take(&mut self.get_buf), std::mem::take(&mut self.int_tx)) {
+            std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
+                let r: &mut dyn std::io::Read = &mut get_buf.get_read();
+                let mut buf = std::io::BufReader::with_capacity(BUFREADER_CAPACITY, r);
+                loop {
+                    if !command_read_std(&mut buf, &int_tx) {
+                        break;
                     }
-                })));
-            },
-
-            _ => (),
-
+                }
+            })));
         }
     }
 
@@ -514,7 +502,7 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
 
     fn new(w: W, rx: Receiver<Line>) -> SinkProcessor<W> {
         let (int_tx, int_rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
-        let mut r = SinkProcessor { err_rx: None, get_w: Some(w), rx, jh: None, int_tx: int_tx, int_rx: Some(int_rx), pending: None };
+        let mut r = SinkProcessor { err_rx: None, get_w: Some(w), rx, jh: None, int_tx, int_rx: Some(int_rx), pending: None };
         r.setup();
         r
     }
@@ -524,70 +512,54 @@ impl <W: 'static + GetWrite + Send> SinkProcessor<W> {
         let (err_tx, err_rx): (SyncSender<ProcessError>, Receiver<ProcessError>) = sync_channel(INTERNAL_SYNC_CHANNEL_SIZE);
         self.err_rx = Some(err_rx);
 
-        match (std::mem::take(&mut self.int_rx), std::mem::take(&mut self.get_w)) {
-            (Some(int_rx), Some(get_buf)) => {
-                std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
-                    let mut wr = std::io::BufWriter::with_capacity(BUFWRITER_CAPACITY, get_buf.get_write());
-                    loop {
-                        match int_rx.recv() {
-                            Ok(None) => {
-                                match wr.flush() {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        err_tx.send(
-                                            ProcessError(e, "Error flushing at end of stream".to_owned()),
-                                        ).expect("Error sending \"Error flushing at end of stream\"");
-                                        return;
-                                    }
-                                }
-                                return ();
+        if let (Some(int_rx), Some(get_buf)) = (std::mem::take(&mut self.int_rx), std::mem::take(&mut self.get_w)) {
+            std::mem::swap(&mut self.jh, &mut Some(std::thread::spawn(move || {
+                let mut wr = std::io::BufWriter::with_capacity(BUFWRITER_CAPACITY, get_buf.get_write());
+                loop {
+                    match int_rx.recv() {
+                        Ok(None) => {
+                            if let Err(e) = wr.flush() {
+                                err_tx.send(
+                                    ProcessError(e, "Error flushing at end of stream".to_owned()),
+                                ).expect("Error sending \"Error flushing at end of stream\"");
+                                return;
                             }
-                            Ok(Some(line)) => {
-                                match wr.write_all(line.as_bytes()) {
-                                    Err(e) => {
-                                        err_tx.send(
-                                            ProcessError(e, "Error writing line".to_owned()),
-                                        ).expect("Error sending \"Error writing line\"");
-                                        return;
-                                    }
-                                    Ok(_) => (),
-                                }
-                                match wr.flush() {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        err_tx.send(
-                                            ProcessError(e, "Error flushing at end of stream".to_owned()),
-                                        ).expect("Error sending \"Error flushing at end of stream\"");
-                                        return;
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                match wr.flush() {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        err_tx.send(
-                                            ProcessError(e, "Error flushing line in stream".to_owned()),
-                                        ).expect("Error sending \"Error flushing line in stream\"");
-                                        return;
-                                    }
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(10));
-                            },
+                            return;
                         }
+                        Ok(Some(line)) => {
+                            if let Err(e) = wr.write_all(line.as_bytes()) {
+                                err_tx.send(
+                                    ProcessError(e, "Error writing line".to_owned()),
+                                ).expect("Error sending \"Error writing line\"");
+                                return;
+                            }
+                            if let Err(e) = wr.flush() {
+                                err_tx.send(
+                                    ProcessError(e, "Error flushing at end of stream".to_owned()),
+                                ).expect("Error sending \"Error flushing at end of stream\"");
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            if let Err(e) = wr.flush() {
+                                err_tx.send(
+                                    ProcessError(e, "Error flushing line in stream".to_owned()),
+                                ).expect("Error sending \"Error flushing line in stream\"");
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        },
                     }
-                })));
-            },
-            _ => (),
+                }
+            })));
         }
 
     }
 
     fn do_send(&mut self, mut ps: ProcessStatus) -> Result<ProcessStatus, ProcessError> {
 
-        match self.err_rx.as_ref().map(|chan| chan.try_recv()) {
-            Some(Ok(e)) => { return Err(e); },
-            _ => (),
+        if let Some(Ok(e)) = self.err_rx.as_ref().map(|chan| chan.try_recv()) {
+            return Err(e);
         }
 
         let line = match std::mem::take(&mut self.pending) {
@@ -864,33 +836,27 @@ impl CommandProcessor {
                         match inner_stdin_rx.recv() {
                             Ok(None) => {
                                 match stdin.flush() {
-                                    Ok(()) => { return; }
                                     Err(e) => {
                                         error_tx_stdin.send(
                                             ProcessError(e, "Error flushing at end of stream".to_owned()),
                                         ).expect("Error sending \"Error flushing at end of stream\"");
                                         return;
                                     }
+                                    Ok(()) => { return; }
                                 }
                             },
                             Ok(Some(line)) => {
-                                match stdin.write_all(line.as_bytes()) {
-                                    Ok (_) => {},
-                                    Err(e) => {
-                                        error_tx_stdin.send(
-                                            ProcessError(e, "Error writing line".to_owned()),
-                                        ).expect("Error sending \"Error writing line\"");
-                                        return;
-                                    }
+                                if let Err(e) = stdin.write_all(line.as_bytes()) {
+                                    error_tx_stdin.send(
+                                        ProcessError(e, "Error writing line".to_owned()),
+                                    ).expect("Error sending \"Error writing line\"");
+                                    return;
                                 }
-                                match stdin.flush() {
-                                    Ok(()) => (),
-                                    Err(e) => {
-                                        error_tx_stdin.send(
-                                            ProcessError(e, "Error flushing line in stream".to_owned()),
-                                        ).expect("Error sending \"Error flushing line in stream\"");
-                                        return;
-                                    }
+                                if let Err(e) = stdin.flush() {
+                                    error_tx_stdin.send(
+                                        ProcessError(e, "Error flushing line in stream".to_owned()),
+                                    ).expect("Error sending \"Error flushing line in stream\"");
+                                    return;
                                 }
                             },
                             Err(_x) => {
@@ -978,81 +944,62 @@ impl CommandProcessor {
             }
         }
 
-        match self.error_rx.as_ref().map(|chan| chan.try_recv()) {
-            Some(Ok(e)) => { return Err(e); }
-            _ => (),
+        if let Some(Ok(e)) = self.error_rx.as_ref().map(|chan| chan.try_recv()) {
+            return Err(e);
         }
 
         // TODO: Fix when fixed - https://github.com/rust-lang/rust/issues/68354
-        match std::mem::take(&mut self.pending_stdin) {
-            Some(pending_stdin_line) => {
-                match &self.inner_stdin_tx {
-                    Some(inner_stdin_tx) => {
-                        match trysend(inner_stdin_tx, pending_stdin_line) {
-                            SendStatus::Pending(v) => {
-                                ps.set_stopped_by(StoppedBy::InternallyFull);
-                                self.pending_stdin = Some(v);
-                            },
-                            SendStatus::Finished => {
-                                self.inner_stdin_tx = None;
-                            },
-                            SendStatus::Sent => {
-                                ps.add_to_read_from(vec![0].into_iter());
-                            },
-                        }
-                    }
-                    _ => (),
+        if let Some(pending_stdin_line) = std::mem::take(&mut self.pending_stdin) {
+            if let Some(inner_stdin_tx) = &self.inner_stdin_tx {
+                match trysend(inner_stdin_tx, pending_stdin_line) {
+                    SendStatus::Pending(v) => {
+                        ps.set_stopped_by(StoppedBy::InternallyFull);
+                        self.pending_stdin = Some(v);
+                    },
+                    SendStatus::Finished => {
+                        self.inner_stdin_tx = None;
+                    },
+                    SendStatus::Sent => {
+                        ps.add_to_read_from(vec![0].into_iter());
+                    },
                 }
             }
-            _ => (),
         };
 
         // TODO: Fix when fixed - https://github.com/rust-lang/rust/issues/68354
-        match std::mem::take(&mut self.pending_stdout) {
-            Some(pending_stdout_line) => {
-                match &self.stdout_tx {
-                    Some(stdout_tx) => {
-                        match trysend(stdout_tx, pending_stdout_line) {
-                            SendStatus::Pending(v) => {
-                                ps.set_stopped_by(StoppedBy::OutputFull);
-                                self.pending_stdout = Some(v);
-                            },
-                            SendStatus::Finished => {
-                                self.stdout_tx = None;
-                            },
-                            SendStatus::Sent => {
-                                ps.add_to_wrote_to(vec![-1].into_iter());
-                            },
-                        }
-                    }
-                    _ => (),
+        if let Some(pending_stdout_line) = std::mem::take(&mut self.pending_stdout) {
+            if let Some(stdout_tx) = &self.stdout_tx {
+                match trysend(stdout_tx, pending_stdout_line) {
+                    SendStatus::Pending(v) => {
+                        ps.set_stopped_by(StoppedBy::OutputFull);
+                        self.pending_stdout = Some(v);
+                    },
+                    SendStatus::Finished => {
+                        self.stdout_tx = None;
+                    },
+                    SendStatus::Sent => {
+                        ps.add_to_wrote_to(vec![-1].into_iter());
+                    },
                 }
             }
-            _ => (),
         };
 
         // TODO: Fix when fixed - https://github.com/rust-lang/rust/issues/68354
-        match std::mem::take(&mut self.pending_stderr) {
-            Some(pending_stderr_line) => {
-                match &self.stderr_tx {
-                    Some(stderr_tx) => {
-                        match trysend(stderr_tx, pending_stderr_line) {
-                            SendStatus::Pending(v) => {
-                                ps.set_stopped_by(StoppedBy::OutputFull);
-                                self.pending_stderr = Some(v);
-                            },
-                            SendStatus::Finished => {
-                                self.stderr_tx = None;
-                            },
-                            SendStatus::Sent => {
-                                ps.add_to_wrote_to(vec![-2].into_iter());
-                            },
-                        }
-                    }
-                    _ => (),
+        if let Some(pending_stderr_line) = std::mem::take(&mut self.pending_stderr) {
+            if let Some(stderr_tx) = &self.stderr_tx {
+                match trysend(stderr_tx, pending_stderr_line) {
+                    SendStatus::Pending(v) => {
+                        ps.set_stopped_by(StoppedBy::OutputFull);
+                        self.pending_stderr = Some(v);
+                    },
+                    SendStatus::Finished => {
+                        self.stderr_tx = None;
+                    },
+                    SendStatus::Sent => {
+                        ps.add_to_wrote_to(vec![-2].into_iter());
+                    },
                 }
             }
-            _ => (),
         };
 
         match (self.exit_status_sent, &self.exit_tx, self.child.try_wait()) {
@@ -1087,17 +1034,10 @@ impl CommandProcessor {
     }
 
     fn close_exit_status_channel(&mut self) {
-        match &self.exit_tx {
-            Some(exit_tx) => {
-                match exit_tx.try_send(None) {
-                    Ok(_) => {
-                        self.exit_tx = None;
-                    }
-                    Err(TrySendError::Full(_v)) => (),
-                    Err(TrySendError::Disconnected(_v)) => (),
-                }
+        if let Some(exit_tx) = &self.exit_tx  {
+            if exit_tx.try_send(None).is_ok() {
+                self.exit_tx = None;
             }
-            _ => (),
         }
     }
 
@@ -1149,11 +1089,8 @@ impl Processable for CommandProcessor {
                 },
             };
 
-            match (stdin_processed, stdout_processed, stderr_processed) {
-                (false, false, false) => {
-                    return Ok(process_status);
-                },
-                _ => (),
+            if let (false, false, false) = (stdin_processed, stdout_processed, stderr_processed) {
+                return Ok(process_status);
             }
 
         }
@@ -1179,9 +1116,7 @@ impl Junction {
     pub fn new() -> Junction {
 
         Junction {
-            input: vec![],
-            config_stage: true,
-            output: vec![],
+            ..Default::default()
         }
 
     }
@@ -1193,19 +1128,28 @@ impl Junction {
                 self.input.push((priority, (connection_id, rx)));
                 Ok(connection_id)
             },
-            false => return Err(CannotAllocateInputError::CannotAllocateInputError),
+            false => Err(CannotAllocateInputError::CannotAllocateInputError),
         }
     }
 
+}
+
+impl Default for Junction {
+    fn default() -> Self {
+        Junction {
+            input: vec![],
+            config_stage: true,
+            output: vec![],
+        }
+    }
 }
 
 impl InputOutput for Junction {
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
-        match s {
-            Port::ERR => { return Err(CannotAllocateOutputError::CannotAllocateOutputError); },
-            _ => (),
+        if let Port::ERR = s {
+            return Err(CannotAllocateOutputError::CannotAllocateOutputError)
         }
 
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
@@ -1215,7 +1159,7 @@ impl InputOutput for Junction {
                 self.output.push(tx);
                 Ok(Connected(rx, id))
             },
-            false => return Err(CannotAllocateOutputError::CannotAllocateOutputError),
+            false => Err(CannotAllocateOutputError::CannotAllocateOutputError),
         }
 
     }
@@ -1255,11 +1199,13 @@ impl GetProcessable for Junction {
 #[derive(Debug)]
 pub struct PendingMessage (usize, Line);
 
+type JunctionConnection = Option<(ConnectionId, Receiver<Line>)>;
+
 #[derive(Debug)]
 pub struct JunctionProcessor {
     positions: Vec<usize>,
     lengths: Vec<usize>,
-    input: Vec<Vec<Option<(ConnectionId, Receiver<Line>)>>>,
+    input: Vec<Vec<JunctionConnection>>,
     output: Vec<SyncSender<Line>>,
     partially_sent: Option<PendingMessage>,
 }
@@ -1303,7 +1249,7 @@ impl JunctionProcessor {
             a.result.push(v);
         }
 
-        while input.len() > 0 {
+        while !input.is_empty() {
             let (n, x) = input.pop().unwrap();
             if n != acc.priority {
                 shuffle_acc(&mut acc);
@@ -1312,13 +1258,15 @@ impl JunctionProcessor {
             acc.current.push(Some(x));
         }
 
-        if acc.current.len() > 0 {
+        if !acc.current.is_empty() {
             shuffle_acc(&mut acc);
         }
         acc.result
     }
 
-    fn get_priority_sequence(lengths: &Vec<usize>, positions: &Vec<usize>, priority: usize) -> Vec<usize> {
+    fn get_priority_sequence(lengths: &[usize], positions: &[usize], priority: usize) -> Vec<usize> {
+
+        #![allow(clippy::needless_range_loop)]
 
         let mut r = vec![9; lengths[priority]];
         let d = |i| if i == 0 { lengths[priority] - 1 } else { i - 1 };
@@ -1337,12 +1285,12 @@ impl JunctionProcessor {
     }
 
 
-    fn get_lengths<X>(input: &Vec<Vec<X>>) -> Vec<usize> {
+    fn get_lengths<X>(input: &[Vec<X>]) -> Vec<usize> {
         input.iter().map(|inp| inp.len()).collect()
     }
 
 
-    fn no_inputs_left<X>(input: &Vec<Vec<Option<X>>>) -> bool {
+    fn no_inputs_left<X>(input: &[Vec<Option<X>>]) -> bool {
         for v in input {
             for o in v {
                 if o.is_some() { return false }
@@ -1352,7 +1300,7 @@ impl JunctionProcessor {
     }
 
 
-    fn get_line(rx: &Vec<Vec<Option<(ConnectionId, Receiver<Line>)>>>, lengths: &Vec<usize>, positions: &Vec<usize>) -> Result<(usize, usize, ConnectionId, Line), TryRecvError> {
+    fn get_line(rx: &[Vec<JunctionConnection>], lengths: &[usize], positions: &[usize]) -> Result<(usize, usize, ConnectionId, Line), TryRecvError> {
 
         fn mapper(o: &Option<(ConnectionId, Receiver<Line>)>) -> Result<(ConnectionId, Line), TryRecvError> {
             match o {
@@ -1361,12 +1309,11 @@ impl JunctionProcessor {
             }
         }
 
-        for priority in 0..rx.len() {
+        for (priority, r) in rx.iter().enumerate() {
             let sequence = JunctionProcessor::get_priority_sequence(&lengths, &positions, priority);
             for pos in sequence {
-                match mapper(&rx[priority][pos]) {
-                    Ok((connection_id, d)) => { return Ok((priority, pos, connection_id, d)); }
-                    Err(_) => {},
+                if let Ok((connection_id, d)) = mapper(&r[pos]) {
+                    return Ok((priority, pos, connection_id, d));
                 }
             }
         }
@@ -1374,15 +1321,15 @@ impl JunctionProcessor {
     }
 
 
-    fn send(tx: &Vec<SyncSender<Line>>, pm: &PendingMessage) -> Option<usize> {
-        for i in pm.0..tx.len() {
-            match tx[i].try_send(pm.1.clone()) {
-                Ok(_) => {},
-                Err(_) => {
-                    return Some(i)
-                }
+    fn send(tx: &[SyncSender<Line>], pm: &PendingMessage) -> Option<usize> {
+        for (i, t) in tx.iter().enumerate().skip(pm.0) {
+            if t.try_send(pm.1.clone()).is_err() {
+                return Some(i)
             }
         }
+        // let sent_messages_up_to = pm.0;
+        // for i in sent_messages_up_to..tx.len() {
+        // }
         None
     }
 
@@ -1433,8 +1380,8 @@ impl JunctionProcessor {
         for i in begin..end {
             r.push(-1 - (i as ConnectionId));
         }
-        return r;
 
+        r
     }
 
 
@@ -1452,7 +1399,7 @@ impl Processable for JunctionProcessor {
 
         for _i in 0..desired_count {
 
-            process_status.add_to_wrote_to(self.send_if_required().iter().map(|i| *i));
+            process_status.add_to_wrote_to(self.send_if_required().iter().copied());
 
             if self.partially_sent.is_some() {
                 process_status.set_stopped_by(StoppedBy::OutputFull);
@@ -1475,13 +1422,13 @@ impl Processable for JunctionProcessor {
                     if JunctionProcessor::no_inputs_left(&self.input) {
                         self.partially_sent = Some(PendingMessage(0, None));
                     }
-                    process_status.add_to_wrote_to(self.send_if_required().iter().map(|i| *i));
+                    process_status.add_to_wrote_to(self.send_if_required().iter().copied());
                 },
                 Ok((priority, pos, connection_id, Some(s))) => {
                     JunctionProcessor::mark_position(&mut self.positions, priority, pos);
                     self.partially_sent = Some(PendingMessage(0, Some(s)));
                     process_status.add_to_read_from(vec![connection_id].into_iter());
-                    process_status.add_to_wrote_to(self.send_if_required().iter().map(|i| *i));
+                    process_status.add_to_wrote_to(self.send_if_required().iter().copied());
                 },
             }
         }
@@ -1560,13 +1507,17 @@ pub type ReadFrom = HashMap<ConnectionId, usize>;
 pub type WroteTo = HashMap<ConnectionId, usize>;
 
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum StoppedBy {
     StillWorking,
     ExhaustedInput,
     Waiting,
     OutputFull,
     InternallyFull,
+}
+
+impl Default for StoppedBy {
+    fn default() -> Self { StoppedBy::StillWorking }
 }
 
 impl PartialEq for StoppedBy
@@ -1588,28 +1539,35 @@ pub struct ProcessStatusError {
     message: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct ProcessStatus {
     pub read_from: ReadFrom,
     pub wrote_to: WroteTo,
     pub stopped_by: StoppedBy
 }
 
-
-impl ProcessStatus {
-
-    pub fn new() -> ProcessStatus {
+impl Default for ProcessStatus {
+    fn default() -> Self {
         ProcessStatus {
             read_from: HashMap::new(),
             wrote_to: HashMap::new(),
             stopped_by: StoppedBy::StillWorking,
         }
     }
+}
+
+impl ProcessStatus {
+
+    pub fn new() -> ProcessStatus {
+        ProcessStatus {
+            ..Default::default()
+        }
+    }
 
     fn add_to_hm<I>(hm: &mut HashMap<ConnectionId, usize>, r: I) where I: Iterator<Item = ConnectionId> {
         for i in r {
             match hm.get_mut(&i) {
-                Some(entry) => *entry = *entry + 1,
+                Some(entry) => *entry += 1,
                 None => {
                     hm.insert(i, 1);
                 }
@@ -1629,6 +1587,7 @@ impl ProcessStatus {
     pub fn set_stopped_by(&mut self, sb: StoppedBy) {
         self.stopped_by = sb;
     }
+
 }
 
 

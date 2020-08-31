@@ -14,11 +14,9 @@ pub enum AccountingOperation {
     Subtraction,
 }
 
-type CsvLine = String;
-
-
 pub type ControlId = String;
 #[derive(Hash, Debug, Clone, PartialEq, Eq)]
+
 pub struct ControlIO(pub SpecType, pub ControlId, pub ConnectionId);
 impl ControlIO {
     pub fn to_tuple(&self) -> (SpecType, ControlId, ConnectionId) {
@@ -31,6 +29,7 @@ impl ControlIO {
         Control(self.0, self.1.to_owned())
     }
 }
+
 #[derive(Hash, Debug, Clone, PartialEq, Eq)]
 pub struct Control(pub SpecType, pub ControlId);
 impl Control {
@@ -38,7 +37,6 @@ impl Control {
         (&self.0, &self.1)
     }
 }
-
 
 pub type ControlIOIndex = usize;
 pub type ControlIndex = usize;
@@ -187,8 +185,7 @@ impl<'a> AccountingBuilder {
                 let (st, ci, p) = cio.to_tuple_ref();
                 rev_control_ios.get(st)
                     .and_then(|hm| hm.get(ci))
-                    .and_then(|hm2| hm2.get(p))
-                    .map(|&u| u)
+                    .and_then(|hm2| hm2.get(p)).copied()
             };
 
             let mapper_cs = |cio: &ControlIO| {
@@ -228,8 +225,7 @@ impl<'a> AccountingBuilder {
                 );
 
                 let o_k = rev_controls.get(&k1)
-                    .and_then(|hm| hm.get(&k2))
-                    .map(|&u| u);
+                    .and_then(|hm| hm.get(&k2)).copied();
 
                 match o_k {
                     Some(k) => { r.insert(k, new_vs); },
@@ -244,7 +240,7 @@ impl<'a> AccountingBuilder {
 
         let mut pipe_size: HashMap<ControlIndex, Vec<usize>> = HashMap::new();
 
-        for (_k, cirs) in &destinations {
+        for cirs in destinations.values() {
             for cir in cirs {
                 Accounting::set_pipe_size(
                     &mut pipe_size,
@@ -319,8 +315,8 @@ impl std::fmt::Display for CouldNotConvertProcessorError {
 
 impl Accounting {
 
-    fn get_control_index<'b>(&self, st: &SpecType, ci: &ControlId) -> Option<usize> {
-        self.rev_controls.get(st).and_then(|hm| hm.get(ci)).map(|&u| u)
+    fn get_control_index(&self, st: &SpecType, control_index: &str) -> Option<usize> {
+        self.rev_controls.get(st).and_then(|hm| hm.get(control_index)).copied()
     }
 
     pub fn get_control(&self, i: ControlIndex) -> Option<&Control> {
@@ -348,9 +344,13 @@ impl Accounting {
 
     fn update_total_stats(total: &mut usize, entering: bool, count: &usize) {
         match entering {
-            true => { *total = *total + count; },
-            false => { *total = *total - count; },
+            true => { *total += count; },
+            false => { *total -= count; },
         }
+    }
+
+    pub fn pipe_sizes(&self) -> &PipeSizeHash {
+        &self.pipe_size
     }
 
     fn get_pipe_sizes<'x>(pipe_size: &'x PipeSizeHash, ci: &ControlIndex) -> Option<&'x Vec<usize>> {
@@ -412,12 +412,10 @@ impl Accounting {
         let get_count = |n: usize| {
             if operation == AccountingOperation::Addition {
                 Some(n + *count) // i32::try_from(*count).unwrap()
+            } else if n >= *count {
+                Some(n - *count) // i32::try_from(*count).unwrap()
             } else {
-                if n >= *count {
-                    Some(n - *count) // i32::try_from(*count).unwrap()
-                } else {
-                    None
-                }
+                None
             }
         };
 
@@ -439,7 +437,7 @@ impl Accounting {
         (0 - (outbound_connection_id + 1)) as usize
     }
 
-    fn out_as_csv_line(out: &Vec<String>) -> Result<String, Box<dyn std::error::Error>> {
+    fn out_as_csv_line(out: &[String]) -> Result<String, Box<dyn std::error::Error>> {
         let mut wtr = Writer::from_writer(vec![]);
         wtr.write_record(out)?;
         Ok(String::from_utf8(wtr.into_inner()?)?)
@@ -526,9 +524,7 @@ impl Accounting {
     }
 
 
-    pub fn update(&mut self, control_index: &ControlIndex, ps: &ProcessStatus) -> Vec<CsvLine> {
-
-        let mut csv_lines = Vec::with_capacity(ps.wrote_to.len() + ps.read_from.len());
+    pub fn update(&mut self, control_index: &ControlIndex, ps: &ProcessStatus) {
 
         for (src_connection_id, count) in ps.wrote_to.iter() {
 
@@ -565,36 +561,18 @@ impl Accounting {
         }
 
         for (connection_id, count) in ps.read_from.iter() {
-            // let control = ControlIO(spec_type, control_id.to_owned(), *connection_id);
-            // csv_lines.push(self.debug_line(&control, count, AccountingOperation::Subtraction));
-            // match self.get_control_io_index(&spec_type, &control_id, connection_id) {
-            //     Some(index) => {
-            //         Accounting::update_stats(&mut self.enter, &index, count);
-            //     }
-            //     None => {
-            //         panic!("Accounting could not find ControlIOIndex for {:?}:{:?}:{:?}", &spec_type, &control_id, connection_id);
-            //     }
-            // }
-            // Accounting::update_stats(&mut self.enter, &control, count);
-
             Accounting::update_total_stats(&mut self.total_size, false, count);
             Accounting::update_pipe_size(&mut self.pipe_size, &control_index, connection_id, count, AccountingOperation::Subtraction);
         }
 
-        match &ps.stopped_by {
-            StoppedBy::ExhaustedInput => {
-                self.finished.insert(*control_index);
-            }
-            _ => (),
+        if let StoppedBy::ExhaustedInput = &ps.stopped_by {
+            self.finished.insert(*control_index);
         }
-
-
-        csv_lines
 
     }
 
     pub fn update_failed(control_index: &ControlIndex, process_status: &ProcessStatus, failed: &mut Failed) {
-        match (process_status.read_from.len() > 0) || (process_status.wrote_to.len() > 0) {
+        match (!process_status.read_from.is_empty()) || (!process_status.wrote_to.is_empty()) {
             true => {
                 failed.clear();
             },
@@ -607,7 +585,7 @@ impl Accounting {
 
     fn get_recommendation_fail(&mut self, failed: &Failed) -> Option<(ProcessCount, ControlIndex)> {
 
-        self.fail_count = self.fail_count + 1;
+        self.fail_count += 1;
 
         let approx_desired_size = self.controls.len() * (
             (self.channel_high_watermark - self.channel_low_watermark / 2) +
@@ -642,14 +620,14 @@ impl Accounting {
 
         let get_src_index_to_run = |vs: &Vec<usize>, desired: Ordering| {
             let mut r: Option<(usize, usize)> = None;
-            for i in 0..vs.len() {
+            for (i, v) in vs.iter().enumerate() {
                 match r {
                     None => {
-                        r = Some((vs[i], i));
+                        r = Some((*v, i));
                     },
                     Some((other_hunger, _other_i)) => {
-                        if vs[i].cmp(&other_hunger) == desired {
-                            r = Some((vs[i], i));
+                        if v.cmp(&other_hunger) == desired {
+                            r = Some((*v, i));
                         }
                     },
                 }
@@ -770,13 +748,13 @@ impl Accounting {
     pub fn get_ends(&self) -> Vec<ControlIndex> {
         let s: HashSet<ControlIndex> = self.sources.iter().map(|(ind, _v)| *ind).collect();
         let e: HashSet<ControlIndex> = self.destinations.iter().map(|(ind, _v)| *ind).collect();
-        s.difference(&e).map(|x| *x).collect()
+        s.difference(&e).copied().collect()
     }
 
     pub fn get_starts(&self) -> Vec<ControlIndex> {
         let s: HashSet<ControlIndex> = self.sources.iter().map(|(ind, _v)| *ind).collect();
         let e: HashSet<ControlIndex> = self.destinations.iter().map(|(ind, _v)| *ind).collect();
-        e.difference(&s).map(|x| *x).collect()
+        e.difference(&s).copied().collect()
     }
 
     pub fn get_recommendation(&mut self, status: Option<AccountingStatus>, failed: &Failed) -> Option<(ProcessCount, ControlIndex)> {

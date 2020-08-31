@@ -262,7 +262,7 @@ fn source_to_destination(t: Source) -> Destination {
 }
 
 fn decode_string_to_control(s: &str) -> Option<(SpecType, String)> {
-    match s.split("#").collect::<Vec<&str>>()[..] {
+    match s.split('#').collect::<Vec<&str>>()[..] {
         ["C", t, name] => Some((string_to_control(t), name.to_string())),
         _ => None,
     }
@@ -276,7 +276,7 @@ fn decode_string_to_source(s: &str) -> Option<Source> {
         if s == "O" { Port::OUT } else { Port::ERR }
     }
 
-    match s.rsplit("#").collect::<Vec<&str>>()[..] {
+    match s.rsplit('#').collect::<Vec<&str>>()[..] {
         [port, name, control, _typ] => {
             Some(Source { spec_type: string_to_control(control), name: name.to_owned(), port: port_str_to_enum(&port) })
         },
@@ -296,14 +296,11 @@ pub struct Specification<L> {
 
 fn find_graph_nodes(nodes: &NodeMap, st: SpecType)-> Vec<String> {
     let mut r: Vec<String> = vec![];
-    for (k, _v) in nodes {
-        match decode_string_to_control(k) {
-            Some((t, _)) => {
-                if t == st {
-                    r.push(k.to_owned());
-                }
-            },
-            None => (),
+    for k  in nodes.keys() {
+        if let Some((t, _)) = decode_string_to_control(k) {
+            if t == st {
+                r.push(k.to_owned());
+            }
         }
     }
 
@@ -439,16 +436,16 @@ fn test_find_graph_nodes() {
 fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<CommandDesire<L>>) -> BTreeSet<Builder<L>> {
 
 
-    fn get_command<L>(lines: &mut Vec<CommandDesire<L>>, s: &String) -> Option<Builder<L>> {
+    fn get_command<L>(lines: &mut Vec<CommandDesire<L>>, s: &str) -> Option<Builder<L>> {
         match decode_string_to_control(s) {
             Some((SpecType::CommandSpec, name)) => {
                 lines.iter()
                     .position(|l| l.name == name)
-                    .and_then(|p| Some(lines.remove(p)))
-                    .and_then(|l| Some(Builder::CommandSpec(CommandSpec {
+                    .map(|p| lines.remove(p))
+                    .map(|l| Builder::CommandSpec(CommandSpec {
                         spec: l.spec,
                         name: l.name,
-                    })))
+                    }))
             },
             Some((SpecType::BufferSpec, name)) => {
                 Some(Builder::BufferSpec(BufferSpec { name }))
@@ -462,11 +459,8 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
 
     fn iterator<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: &mut Vec<CommandDesire<L>>, src: NodeIndex, mut r: &mut BTreeSet<Builder<L>>) {
 
-        match get_command(&mut lines, &graph[src]) {
-            Some(c) => {
-                r.insert(c);
-            },
-            _ => (),
+        if let Some(c) = get_command(&mut lines, &graph[src]) {
+            r.insert(c);
         }
 
         for n in graph.neighbors(src) {
@@ -474,31 +468,24 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
             let mut tried = false;
             let mut added = false;
 
-            match get_command(&mut lines, &graph[n]) {
-                Some(c) => {
-                    tried = true;
-                    added = r.insert(c) || added;
-                },
-                _ => (),
+            if let Some(c) = get_command(&mut lines, &graph[n]) {
+                tried = true;
+                added = r.insert(c) || added;
             }
 
-            let priority = match graph.find_edge(src, n).map(|e| graph.edge_weight(e)).flatten() {
-                Some(n) => *n,
-                None => 0,
-            };
+            let priority = graph.find_edge(src, n)
+                .map(|e| graph.edge_weight(e))
+                .flatten()
+                .unwrap_or(&0);
 
-            match (decode_string_to_source(&graph[src]), decode_string_to_source(&graph[n]).map(source_to_destination)) {
-                (Some(src_target), Some(dst_target)) => {
-
-                    let join = Builder::JoinSpec(JoinSpec {
-                        src: src_target,
-                        dst: dst_target,
-                        priority,
-                    });
-                    tried = true;
-                    added = r.insert(join) || added;
-                }
-                _ => (),
+            if let (Some(src_target), Some(dst_target)) = (decode_string_to_source(&graph[src]), decode_string_to_source(&graph[n]).map(source_to_destination)) {
+                let join = Builder::JoinSpec(JoinSpec {
+                    src: src_target,
+                    dst: dst_target,
+                    priority: *priority
+                });
+                tried = true;
+                added = r.insert(join) || added;
             }
 
             if !tried || added {
@@ -518,7 +505,7 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
 }
 
 fn increment_id(id: &mut u32) -> u32 {
-    *id = *id + 1;
+    *id += 1;
     *id
 }
 
@@ -533,12 +520,9 @@ fn junction_spec_multi_out(graph: &TheGraph, nodes: &NodeMap, direction: Directi
         let neighbors = graph.neighbors_directed(*item, direction);
 
         for neigh in neighbors {
-            match decode_string_to_source(&graph[neigh]) {
-                Some(t) => {
-                    out_count = out_count + 1;
-                    dst.push(t)
-                },
-                None => {},
+            if let Some(t) = decode_string_to_source(&graph[neigh]) {
+                out_count += 1;
+                dst.push(t)
             }
         }
 
@@ -559,7 +543,7 @@ fn junction_spec_multi_out(graph: &TheGraph, nodes: &NodeMap, direction: Directi
 
     }
 
-    nodes.into_iter().fold(
+    nodes.iter().fold(
         vec![],
         |acc, (_node, node_index)| get_multi_folder(&graph, acc, node_index, direction)
     )
@@ -614,7 +598,7 @@ fn get_control_node_from_destination(graph: &mut TheGraph, nodes: &mut NodeMap, 
 }
 
 fn add_junctions(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, junction_positions: Vec<JunctionPosition>, direction: usize, mut edge_id: &mut u32) {
-    for i in 0..junction_positions.len() {
+    for (i, jp) in junction_positions.iter().enumerate() {
 
         let junction_in = Destination {
             spec_type: SpecType::JunctionSpec,
@@ -634,29 +618,19 @@ fn add_junctions(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, junction_pos
         graph.add_edge(n_buf_in, n_buf, increment_id(&mut edge_id));
         graph.add_edge(n_buf, n_buf_out, increment_id(&mut edge_id));
 
-        for d in &junction_positions[i].dst {
-            for s in &junction_positions[i].src {
-                match (nodes.get(&encode_source_port(s)), nodes.get(&encode_destination_port(d))) {
-                    (Some(sn), Some(dn)) => {
-                        match graph.find_edge(*sn, *dn) {
-                            Some(e) => {
-                                graph.remove_edge(e);
-                                match graph.find_edge(*sn,n_buf_in) {
-                                    None => { graph.add_edge(*sn, n_buf_in, increment_id(&mut edge_id)); }
-                                    _ => (),
-                                }
-                                match graph.find_edge(n_buf_out, *dn) {
-                                    None => { graph.add_edge(n_buf_out, *dn, increment_id(&mut edge_id)); }
-                                    _ => (),
-                                }
-                            },
-                            None => (),
-                        }
+        for d in &jp.dst { for s in &jp.src {
+            if let (Some(sn), Some(dn)) = (nodes.get(&encode_source_port(s)), nodes.get(&encode_destination_port(d))) {
+                if let Some(e) = graph.find_edge(*sn, *dn) {
+                    graph.remove_edge(e);
+                    if graph.find_edge(*sn,n_buf_in).is_none() {
+                        graph.add_edge(*sn, n_buf_in, increment_id(&mut edge_id));
                     }
-                    _ => (),
+                    if graph.find_edge(n_buf_out, *dn).is_none() {
+                        graph.add_edge(n_buf_out, *dn, increment_id(&mut edge_id));
+                    }
                 }
             }
-        }
+        } }
     }
 }
 
@@ -675,28 +649,20 @@ fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap) {
 
             let neighbors = graph.neighbors_directed(*item, direction);
 
-            match decode_string_to_source(&graph[*item]) {
-                Some(t) => {
-                    for neigh in neighbors {
-                        match decode_string_to_source(&graph[neigh]) {
-                            Some(d) => {
-                                if d.spec_type == SpecType::CommandSpec {
-                                    acc.push(
-                                        BufferPosition { src: t.clone(), dst: source_to_destination(d) },
-                                    );
-                                }
-                            },
-                            None => (),
-                        }
+            for neigh in neighbors {
+                if let (Some(t), Some(d)) = (decode_string_to_source(&graph[*item]), decode_string_to_source(&graph[neigh])) {
+                    if d.spec_type == SpecType::CommandSpec {
+                        acc.push(
+                            BufferPosition { src: t.clone(), dst: source_to_destination(d) },
+                        );
                     }
                 }
-                None => (),
             }
 
             acc
         }
 
-        nodes.into_iter().fold(
+        nodes.iter().fold(
             vec![],
             |acc, (_node, node_index)| get_multi_folder(&graph, acc, node_index, Direction::Outgoing)
         )
@@ -704,7 +670,7 @@ fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap) {
 
     let buffer_positions = buffer_spec_multi_out(&graph, &nodes);
 
-    for i in 0..buffer_positions.len() {
+    for (i, bp) in buffer_positions.iter().enumerate() {
 
         let buffer_in = Destination {
             spec_type: SpecType::BufferSpec,
@@ -726,25 +692,16 @@ fn add_buffers(mut graph: &mut TheGraph, mut nodes: &mut NodeMap) {
         graph.add_edge(n_buf_in, n_buf, increment_id(&mut edge_id));
         graph.add_edge(n_buf, n_buf_out, increment_id(&mut edge_id));
 
-        match (nodes.get(&encode_source_port(&buffer_positions[i].src)), nodes.get(&encode_destination_port(&buffer_positions[i].dst))) {
-            (Some(sn), Some(dn)) => {
-                match graph.find_edge(*sn, *dn) {
-                    Some(e) => {
-                        graph.remove_edge(e);
-                        match graph.find_edge(*sn,n_buf_in) {
-                            None => { graph.add_edge(*sn, n_buf_in, increment_id(&mut edge_id)); }
-                            _ => (),
-                        }
-                        match graph.find_edge(n_buf_out, *dn) {
-                            None => { graph.add_edge(n_buf_out, *dn, increment_id(&mut edge_id)); }
-                            _ => (),
-                        }
-                    },
-                    None => {
-                    }
+        if let (Some(sn), Some(dn)) = (nodes.get(&encode_source_port(&bp.src)), nodes.get(&encode_destination_port(&bp.dst))) {
+            if let Some(e) = graph.find_edge(*sn, *dn) {
+                graph.remove_edge(e);
+                if graph.find_edge(*sn,n_buf_in).is_none() {
+                    graph.add_edge(*sn, n_buf_in, increment_id(&mut edge_id));
+                }
+                if graph.find_edge(n_buf_out, *dn).is_none() {
+                    graph.add_edge(n_buf_out, *dn, increment_id(&mut edge_id));
                 }
             }
-            _ => (),
         }
     }
 }
@@ -813,7 +770,7 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Resu
 
     let mut commands_seen: BTreeSet<&String> = BTreeSet::new();
     let mut commands_with_no_src: BTreeSet<&String> = lines.iter()
-        .filter(|line| line.src.len() == 0)
+        .filter(|line| line.src.is_empty())
         .map(|line| &line.name)
         .collect();
 
@@ -843,7 +800,7 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Resu
         }
     }
 
-    if (commands_with_no_src.len() > 0) {
+    if !commands_with_no_src.is_empty() {
         return Err(IdentifyError::UnconnectedNode(
             commands_with_no_src.into_iter().map(|s| s.to_owned()).collect::<Vec<String>>()
         ));
@@ -985,7 +942,7 @@ impl JSONTarget {
     pub fn to_target(&self, st: SpecType) -> Source {
         Source {
             spec_type: st,
-            port: self.port.clone(),
+            port: self.port,
             name: self.name.clone(),
         }
     }
@@ -1009,7 +966,7 @@ pub struct JSONCommandDesire {
 }
 
 impl JSONCommandDesire {
-    pub fn to_command_desire(self, tap_names: &BTreeSet<String>) -> CommandDesire<JSONLaunchSpec> {
+    pub fn convert_to_command_desire(self, tap_names: &BTreeSet<String>) -> CommandDesire<JSONLaunchSpec> {
 
         CommandDesire {
             name: self.name,
@@ -1035,13 +992,13 @@ pub struct JSONConfig {
     pub commands: Vec<JSONCommandDesire>,
 }
 
-pub fn find_taps(commands: &Vec<JSONCommandDesire>) -> BTreeSet<String> {
+pub fn find_taps(commands: &[JSONCommandDesire]) -> BTreeSet<String> {
         let mut found_sources: BTreeSet<&str> = BTreeSet::new();
         let mut found_commands: BTreeSet<&str> = BTreeSet::new();
-        for i in 0..commands.len() {
-            found_commands.insert(&commands[i].name);
-            for j in 0..commands[i].src.len() {
-                found_sources.insert(&commands[i].src[j].name);
+        for c in commands {
+            found_commands.insert(&c.name);
+            for j in 0..c.src.len() {
+                found_sources.insert(&c.src[j].name);
             }
         }
         found_sources.difference(&found_commands).map(|&s| s.to_owned()).collect()
@@ -1102,7 +1059,7 @@ fn test_find_taps() {
 }
 
 impl JSONConfig {
-    pub fn to_config(mut self) -> Config<JSONLaunchSpec> {
+    pub fn convert_to_config(mut self) -> Config<JSONLaunchSpec> {
 
         let tap_names: BTreeSet<String> = find_taps(&self.commands);
 
@@ -1119,7 +1076,7 @@ impl JSONConfig {
         }).collect();
 
         let commands: Vec<CommandDesire<JSONLaunchSpec>> = self.commands.into_iter().map(
-            |jd| jd.to_command_desire(&tap_names)
+            |jd| jd.convert_to_command_desire(&tap_names)
         ).collect();
 
         Config { commands, outputs }
