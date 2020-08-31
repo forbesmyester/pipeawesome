@@ -1,5 +1,9 @@
 ## To start a project
 
+```
+./maths | head -n 25 | ./target/debug/pipeawesome -p ./pad_to_8.paspec.json  -t FAUCET=- -s OUTPUT=- 
+```
+
     pipeawesome configuration_file
 
 Will start pipeawesome. If either of `control_fifo` or `orphan_fifo` are not specified they will be created and reported.
@@ -7,6 +11,8 @@ Will start pipeawesome. If either of `control_fifo` or `orphan_fifo` are not spe
 Lines which are piped into `pipeawesome` will enter the `INPUT` stream, be processed by multiple `PROCESSORS` and then lines get to `OUTPUT` stream they will be piped out of `pipeawesome`.
 
     INPUT -> FIFO -> PROCESSOR -> FIFO -> PROCESSOR -> FIFO -> OUTPUT
+
+
 
 ## Example
 

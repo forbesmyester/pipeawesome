@@ -1,0 +1,66 @@
+{
+  "commands": [
+    {
+      "name": "INPUT",
+      "src": [ { "name": "FAUCET", "port": "OUT" } ],
+      "spec": {
+        "command": "awk",
+        "env": { "POSIXLY_CORRECT": "1" },
+        "path": ".",
+        "args":  [ "{print NR  \": \" $s ; fflush()}" ]
+      }
+    },
+    {
+      "name": "GOOD",
+      "src": [
+        { "name": "INPUT", "port": "OUT" },
+        { "name": "ADD_LEADING_ZERO", "port": "OUT" }
+      ],
+      "spec": { "command": "grep", "args": [ "--line-buffered", ".\\{5\\}\\:" ] }
+    },
+    {
+      "name": "ADD_REQUIRE",
+      "src": [
+        { "name": "INPUT", "port": "OUT" }
+      ],
+      "spec": { "command": "sed", "args": [ "-u", "s/^\\([0-9]\\+\\).*/REQUIRE: ITEM: \\1/" ] }
+    },
+    {
+      "name": "ADD_REQUIRE_MARK_END",
+      "src": [
+        { "name": "ADD_REQUIRE", "port": "OUT" }
+      ],
+      "spec": { "command": "sed", "args": [ "$aREQUIRE: END: " ] }
+    },
+    {
+      "name": "TERMINATOR",
+      "src": [
+        { "name": "ADD_REQUIRE_MARK_END", "port": "OUT" },
+        { "name": "GOOD", "port": "OUT" }
+      ],
+      "spec": { "command": "./target/debug/pipeawesome-terminator", "args": [ "-g", "5", "-e", "REQUIRE: END", "-r", "REQUIRE: ITEM: ", "-l", "^0*([^:]+).*", "-p", "$1" ] }
+    },
+    {
+      "name": "BAD",
+      "src": [
+        { "name": "INPUT", "port": "OUT" },
+        { "name": "ADD_LEADING_ZERO", "port": "OUT" }
+      ],
+      "spec": { "command": "grep", "args": [ "--line-buffered", "-v", ".\\{5\\}\\:" ] }
+    },
+    {
+      "name": "ADD_LEADING_ZERO",
+      "src": [ { "name": "BAD", "port": "OUT" } ],
+      "spec": { "command": "sed", "args": [ "-u", "s/^/0/" ] }
+    },
+    {
+      "name": "SORT",
+      "src": [ { "name": "TERMINATOR", "port": "OUT" } ],
+      "spec": { "command": "sort", "args": [] }
+    }
+
+  ],
+  "outputs": {
+    "OUTPUT": [ { "name": "SORT", "port": "OUT" } ]
+  }
+}
