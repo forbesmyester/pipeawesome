@@ -924,7 +924,7 @@ fn test_find_starts() {
     let mut accounting_builder = AccountingBuilder::new(5, 4, 3);
     accounting_builder.add_join(ControlIO(SpecType::TapSpec, "TAP1".to_owned(), -1), ControlIO(SpecType::BufferSpec, "BUF1".to_owned(), 0));
     accounting_builder.add_join(ControlIO(SpecType::BufferSpec, "BUF1".to_owned(), -1), ControlIO(SpecType::CommandSpec, "CMD1".to_owned(), 0));
-    let mut accounting = accounting_builder.build().unwrap();
+    let accounting = accounting_builder.build().unwrap();
     println!("ACC: {:?}", accounting);
 
 

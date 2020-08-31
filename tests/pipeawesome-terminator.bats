@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-EXPECTED=$(cat ./pipeawesome-terminator-test-expected.txt)
+
+EXPECTED=$(cat ./tests/pipeawesome-terminator/expected.txt)
 
 @test "seen all closed via grace period" {
 

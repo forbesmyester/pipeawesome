@@ -829,8 +829,6 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Resu
 #[test]
 fn test_identify_orphan_commands() {
 
-    use petgraph::dot::Dot;
-
     let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
         CommandDesire {
             src: vec![],
@@ -857,8 +855,6 @@ fn test_identify_orphan_commands() {
 
 #[test]
 fn test_identify_duplicate_commands() {
-
-    use petgraph::dot::Dot;
 
     let lines: Vec<CommandDesire<NativeLaunchSpec<HashMap<String, String>, String, String, Vec<String>, String, String, String>>> = vec![
         CommandDesire {
