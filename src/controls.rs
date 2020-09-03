@@ -1004,7 +1004,11 @@ impl CommandProcessor {
 
         match (self.exit_status_sent, &self.exit_tx, self.child.try_wait()) {
             (false, Some(exit_tx), Ok(Some(status))) => {
-                match exit_tx.try_send(Some(format!("{}", status))) {
+                let status_str = match status.code() {
+                    Some(c) => format!("{:?}\n", c),
+                    None => "Signal".to_owned(),
+                };
+                match exit_tx.try_send(Some(status_str)) {
                     Ok(_) => {
                         ps.add_to_wrote_to(vec![-3].into_iter());
                         self.exit_status_sent = true;
