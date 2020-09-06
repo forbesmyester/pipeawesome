@@ -197,21 +197,21 @@ fn get_opts() -> Opts {
             .value_name("PIPEAWESOME_PIPELINE_SPECIFICATION")
             .env("PIPEAWESOME_PIPELINE_SPECIFICATION")
         )
-        .arg(ClapArg::with_name("tap")
+        .arg(ClapArg::with_name("input")
             .help("Where data comes from")
             .takes_value(true)
-            .short("t")
-            .long("tap")
+            .short("i")
+            .long("input")
             .multiple(true)
-            .value_name("TAP")
+            .value_name("INPUT")
         )
-        .arg(ClapArg::with_name("sink")
+        .arg(ClapArg::with_name("output")
             .help("Where data goes to")
             .takes_value(true)
-            .short("s")
-            .long("sink")
+            .short("o")
+            .long("output")
             .multiple(true)
-            .value_name("SINK")
+            .value_name("OUTPUT")
         )
         .arg(ClapArg::with_name("accounting")
             .help("Where to write statistics about what is happening")
@@ -229,7 +229,7 @@ fn get_opts() -> Opts {
     Opts {
         graph: matches.is_present("graph"),
         debug: matches.occurrences_of("debug"),
-        tap: match matches.values_of("tap") {
+        tap: match matches.values_of("input") {
             None => {
                 HashMap::new()
             },
@@ -251,7 +251,7 @@ fn get_opts() -> Opts {
             None => "".to_owned(),
             Some(s) => s.to_string(),
         },
-        sink: match matches.values_of("sink") {
+        sink: match matches.values_of("output") {
             None => {
                 HashMap::new()
             },
