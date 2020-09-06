@@ -174,81 +174,23 @@ impl<'a> AccountingBuilder {
             });
 
 
-        fn extract(
-            hm: HashMap<(SpecType, ControlId), Vec<Option<ControlIO>>>,
-            rev_control_ios: &HashMap<SpecType, HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>>>,
-            rev_controls: &HashMap<SpecType, HashMap<ControlId, ControlIOIndex>>
-            ) -> HashMap<ControlIndex, Vec<ControlIOReference>>
-        {
-
-            let mapper_c_ios = |cio: &ControlIO| {
-                let (st, ci, p) = cio.to_tuple_ref();
-                rev_control_ios.get(st)
-                    .and_then(|hm| hm.get(ci))
-                    .and_then(|hm2| hm2.get(p)).copied()
-            };
-
-            let mapper_cs = |cio: &ControlIO| {
-                let (st, ci, p) = cio.to_tuple_ref();
-                    rev_controls.get(st)
-                        .and_then(|hm| hm.get(ci))
-                        .map(|&u| (u, *p))
-            };
-
-            let mapper = |cio: &ControlIO| {
-                match (mapper_c_ios(&cio), mapper_cs(&cio)) {
-                    (Some(control_io_index), Some((control_index, connection_id))) => {
-                        Some(ControlIOReference {
-                            control_io_index,
-                            control_index,
-                            connection_id
-                        })
-                    },
-                    _ => None,
-                }
-            };
-
-
-            let mut r: HashMap<ControlIndex, Vec<ControlIOReference>> = HashMap::new();
-            for ((k1, k2), vs) in hm {
-                let new_vs: Vec<ControlIOReference> = vs.into_iter().fold(
-                    vec![],
-                    |mut acc, ov| {
-                        match ov.map(|x| mapper(&x)).flatten() {
-                            None => acc,
-                            Some(v) => {
-                                acc.push(v);
-                                acc
-                            }
-                        }
-                    }
-                );
-
-                let o_k = rev_controls.get(&k1)
-                    .and_then(|hm| hm.get(&k2)).copied();
-
-                match o_k {
-                    Some(k) => { r.insert(k, new_vs); },
-                    None => { panic!("Could not find {:?}:{:?} in rev_controls", &k1, &k2); }
-                }
-            }
-            r
-        }
-
-        let sources = extract(self.sources, &rev_control_ios, &rev_controls);
-        let destinations = extract(self.destinations, &rev_control_ios, &rev_controls);
+        let sources = account_builder_extract(self.sources, &rev_control_ios, &rev_controls);
+        let destinations = account_builder_extract(self.destinations, &rev_control_ios, &rev_controls);
 
         let mut pipe_size: HashMap<ControlIndex, Vec<usize>> = HashMap::new();
 
-        for cirs in destinations.values() {
-            for cir in cirs {
-                Accounting::set_pipe_size(
-                    &mut pipe_size,
-                    &cir.control_index,
-                    &cir.connection_id,
-                    0
-                );
-            }
+        let destination_sizes: Vec<(ControlIndex, ConnectionId)> = destinations.values()
+            .fold(vec![], |mut acc, cirs| {
+                for ocir in cirs {
+                    if let Some(cir) = ocir {
+                        acc.push((cir.control_index, cir.connection_id));
+                    }
+                }
+                acc
+            });
+
+        for ds in destination_sizes {
+            Accounting::set_pipe_size(&mut pipe_size, &ds.0, &ds.1, 0);
         }
 
         Some(Accounting {
@@ -272,7 +214,127 @@ impl<'a> AccountingBuilder {
     }
 }
 
-#[derive(Debug)]
+
+fn account_builder_extract(
+    hm: HashMap<(SpecType, ControlId), Vec<Option<ControlIO>>>,
+    rev_control_ios: &HashMap<SpecType, HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>>>,
+    rev_controls: &HashMap<SpecType, HashMap<ControlId, ControlIOIndex>>
+    ) -> HashMap<ControlIndex, Vec<Option<ControlIOReference>>>
+{
+
+    let mapper_c_ios = |cio: &ControlIO| {
+        let (st, ci, p) = cio.to_tuple_ref();
+        rev_control_ios.get(st)
+            .and_then(|hm| hm.get(ci))
+            .and_then(|hm2| hm2.get(p)).copied()
+    };
+
+    let mapper_cs = |cio: &ControlIO| {
+        let (st, ci, p) = cio.to_tuple_ref();
+            rev_controls.get(st)
+                .and_then(|hm| hm.get(ci))
+                .map(|&u| (u, *p))
+    };
+
+    let mapper = |cio: &ControlIO| {
+        match (mapper_c_ios(&cio), mapper_cs(&cio)) {
+            (Some(control_io_index), Some((control_index, connection_id))) => {
+                Some(ControlIOReference {
+                    control_io_index,
+                    control_index,
+                    connection_id
+                })
+            },
+            _ => None,
+        }
+    };
+
+
+    let mut r: HashMap<ControlIndex, Vec<Option<ControlIOReference>>> = HashMap::new();
+    for ((k1, k2), vs) in hm {
+        let new_vs: Vec<Option<ControlIOReference>> = vs.into_iter().fold(
+            vec![],
+            |mut acc, ov| {
+                acc.push(ov.map(|x| mapper(&x)).flatten());
+                acc
+            }
+        );
+
+        let o_k = rev_controls.get(&k1)
+            .and_then(|hm| hm.get(&k2)).copied();
+
+        match o_k {
+            Some(k) => { r.insert(k, new_vs); },
+            None => { panic!("Could not find {:?}:{:?} in rev_controls", &k1, &k2); }
+        }
+    }
+    r
+}
+
+#[test]
+fn test_account_builder_extract() {
+
+    let mut hm_dst: HashMap<(SpecType, ControlId), Vec<Option<ControlIO>>> = HashMap::new();
+    hm_dst.insert(
+        (SpecType::CommandSpec, "QUALITY_CONTROL".to_owned()),
+        vec![None, None, Some(ControlIO(SpecType::SinkSpec, "OUTPUT".to_owned(), 0))]
+    );
+    hm_dst.insert(
+        (SpecType::CommandSpec, "CAT".to_owned()),
+        vec![Some(ControlIO(SpecType::BufferSpec, "BUFFER_0".to_owned(), 0))]
+    );
+    hm_dst.insert(
+        (SpecType::BufferSpec, "BUFFER_0".to_owned()),
+        vec![Some(ControlIO(SpecType::CommandSpec, "QUALITY_CONTROL".to_owned(), 0))]
+    );
+
+    let mut rev_control_ios: HashMap<SpecType, HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>>> = HashMap::new();
+    let mut ios1: HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>> = HashMap::new();
+    let mut ios11: HashMap<ConnectionId, ControlIOIndex> = HashMap::new();
+    ios11.insert(-1, 4);
+    ios11.insert(0, 3);
+    ios1.insert("BUFFER_0".to_owned(), ios11);
+    rev_control_ios.insert(SpecType::BufferSpec, ios1);
+    let mut ios2: HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>> = HashMap::new();
+    let mut ios21: HashMap<ConnectionId, ControlIOIndex> = HashMap::new();
+    ios21.insert(0, 1);
+    ios2.insert("OUTPUT".to_owned(), ios21);
+    rev_control_ios.insert(SpecType::SinkSpec, ios2);
+    let mut ios3: HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>> = HashMap::new();
+    let mut ios31: HashMap<ConnectionId, ControlIOIndex> = HashMap::new();
+    ios31.insert(-1, 2);
+    ios3.insert("CAT".to_owned(), ios31);
+    let mut ios32: HashMap<ConnectionId, ControlIOIndex> = HashMap::new();
+    ios32.insert(-3, 0);
+    ios32.insert(0, 5);
+    ios3.insert("QUALITY_CONTROL".to_owned(), ios32);
+    rev_control_ios.insert(SpecType::CommandSpec, ios3);
+
+    let mut rev_controls: HashMap<SpecType, HashMap<ControlId, ControlIOIndex>> = HashMap::new();
+    let mut c1: HashMap<ControlId, ControlIOIndex> = HashMap::new();
+    let mut c2: HashMap<ControlId, ControlIOIndex> = HashMap::new();
+    let mut c3: HashMap<ControlId, ControlIOIndex> = HashMap::new();
+    c1.insert("OUTPUT".to_owned(), 1);
+    c2.insert("QUALITY_CONTROL".to_owned(), 0);
+    c2.insert("CAT".to_owned(), 2);
+    c3.insert("BUFFER_0".to_owned(), 3);
+    rev_controls.insert(SpecType::SinkSpec, c1);
+    rev_controls.insert(SpecType::CommandSpec, c2);
+    rev_controls.insert(SpecType::BufferSpec, c3);
+
+    println!("HM: {:?}\n\n REV_CONTROL_IOS: {:?}\n\n REV_CONTROLS: {:?}\n\n", &hm_dst, &rev_control_ios, &rev_controls);
+    let result = account_builder_extract(hm_dst, &rev_control_ios, &rev_controls);
+    let mut expected: HashMap<ControlIndex, Vec<Option<ControlIOReference>>> = HashMap::new();
+    expected.insert(3, vec![Some(ControlIOReference { control_io_index: 5, control_index: 0, connection_id: 0 })]);
+    expected.insert(0, vec![None, None, Some(ControlIOReference { control_io_index: 1, control_index: 1, connection_id: 0 })]);
+    expected.insert(2, vec![Some(ControlIOReference { control_io_index: 3, control_index: 3, connection_id: 0 })]);
+    println!("RESULT: {:?}", result);
+    assert_eq!(expected, result);
+
+}
+
+
+#[derive(Debug,PartialEq)]
 struct ControlIOReference {
     control_io_index: ControlIOIndex,
     control_index: ControlIndex,
@@ -290,10 +352,31 @@ pub struct Accounting {
 
     control_ios: Vec<ControlIO>,
     controls: Vec<Control>,
-    rev_control_ios: HashMap<SpecType, HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>>>,
+    /**
+     * If you want to look up a Control from a ControlIndex it is just the index
+     * of `self.controls`, this is the opposite allowing you to get a
+     * ControlIndex from a Control.
+     */
     rev_controls: HashMap<SpecType, HashMap<ControlId, ControlIndex>>,
-    sources: HashMap<ControlIndex, Vec<ControlIOReference>>,
-    destinations: HashMap<ControlIndex, Vec<ControlIOReference>>,
+    /**
+     * This is a reverse lookup for `self.control_ios` similar to how
+     * `rev_controls` works for `controls`
+     */
+    rev_control_ios: HashMap<SpecType, HashMap<ControlId, HashMap<ConnectionId, ControlIOIndex>>>,
+    /**
+     * Given a ControlIndex and a outbound ConnectionId you can look up the
+     * destination, via the key and the position in the Vector.
+     */
+    sources: HashMap<ControlIndex, Vec<Option<ControlIOReference>>>,
+    /**
+     * Given a ControlIndex and a outbound ConnectionId you can look up the
+     * destination, via the key and the position in the Vector.
+     *
+     * NOTE: outbound connections are negative isize, you will need to use
+     * `Accounting::outbound_connection_id_to_vec_index()` to get the position
+     * in the Vector.
+     */
+    destinations: HashMap<ControlIndex, Vec<Option<ControlIOReference>>>,
 
     fail_count: usize,
     total_size: usize,
@@ -503,8 +586,12 @@ impl Accounting {
         let outbound_ports = match destinations {
             Some(destinations) => {
                 let mut sizes: Vec<usize> = Vec::with_capacity(destinations.len());
-                for ci in destinations {
-                    sizes.push(Accounting::get_pipe_size(&self.pipe_size, &ci.control_index, &ci.connection_id));
+                for oci in destinations.iter() {
+                    sizes.push(
+                        oci.as_ref().map(|ci| {
+                            Accounting::get_pipe_size(&self.pipe_size, &ci.control_index, &ci.connection_id)
+                        }).unwrap_or(0)
+                    );
                 }
                 sizes
             },
@@ -539,8 +626,8 @@ impl Accounting {
             };
 
             let (dst_control_index, dst_connection_id) = match o_dst_control_io_ref {
-                Some(control_io_ref) => (control_io_ref.control_index, control_io_ref.connection_id),
-                None => {
+                Some(Some(control_io_ref)) => (control_io_ref.control_index, control_io_ref.connection_id),
+                _ => {
                     let (src_spec_type, src_control_id) = self.controls.get(*control_index).unwrap().to_tuple_ref();
                     panic!(
                         "Accounting should have had a destination for {:?}: {:?} but did not",
@@ -640,13 +727,13 @@ impl Accounting {
             !failed.contains(&control_index)
         };
 
-        let try_ret_from_vec = |quantity: usize, port: usize, hm: &HashMap<ControlIndex, Vec<ControlIOReference>>| {
+        let try_ret_from_vec = |quantity: usize, port: usize, hm: &HashMap<ControlIndex, Vec<Option<ControlIOReference>>>| {
 
             let x = hm.get(&status.control_index)
                 .and_then(|v| v.get(port));
 
             let one = match x {
-                Some(dst) => {
+                Some(Some(dst)) => {
                     Some((quantity, dst))
                 }
                 _ => None
@@ -673,52 +760,36 @@ impl Accounting {
 
         match (inbound, outbound) {
 
-            // NONE -> HERE(TAP) -->
             (None, Some((out_fill, _out_port)))
                 if (out_fill < self.channel_high_watermark) && not_me(status.control_index) => {
-                    // println!("CHOICE: 1");
                     Some((self.channel_size - out_fill, status.control_index))
                 },
             (None, Some((_, out_port))) => {
-                // println!("CHOICE: 2");
                 try_ret_from_vec(self.channel_high_watermark - self.channel_low_watermark, out_port, &self.destinations)
             },
 
-            // ??? -> HERE(SINK) -> None
             (Some((in_fill, _in_port)), None) if (in_fill > self.channel_high_watermark) && not_me(status.control_index) => {
-                // println!("CHOICE: 3");
                 Some((in_fill - self.channel_high_watermark, status.control_index))
             }
-            // (Some((in_fill, in_port)), None) if (in_fill > 0) && not_me(&status.spec_type, &status.control_id) => {
-            //     println!("CHOICE: 3");
-            //     Some((in_fill, status.spec_type, status.control_id))
-            // }
             (Some((in_fill, in_port)), None) if in_fill < self.channel_low_watermark  => {
-                // println!("CHOICE: 4");
                 try_ret_from_vec(self.channel_high_watermark - in_fill, in_port, &self.sources)
             }
             (Some((in_fill, in_port)), None) => {
-                // println!("CHOICE: 4.5");
                 try_ret_from_vec(in_fill, in_port, &self.sources)
             }
 
-            // ??? -> HERE -> ???
             (Some((in_fill, in_port)), Some((_out_fill, _out_port))) if in_fill < self.channel_low_watermark => {
-                // println!("CHOICE: 5");
                 try_ret_from_vec(self.channel_high_watermark - in_fill, in_port, &self.sources)
             }
             (Some((_in_fill, _in_port)), Some((out_fill, out_port))) if out_fill > self.channel_high_watermark => {
-                // println!("CHOICE: 7");
                 try_ret_from_vec(out_fill - self.channel_high_watermark, out_port, &self.destinations)
             }
             (Some(_), Some((out_fill, _out_port)))
                 if (out_fill < self.channel_low_watermark) && not_me(status.control_index) => {
-                    // println!("CHOICE: 6");
                     Some((self.channel_high_watermark - out_fill, status.control_index))
                 }
             (Some((in_fill, _in_port)), Some(_))
                 if (in_fill > self.channel_high_watermark) && not_me(status.control_index) => {
-                    // println!("CHOICE: 8");
                     Some((in_fill - self.channel_high_watermark, status.control_index))
                 }
             (Some((in_fill, in_port)), Some((out_fill, out_port)))  => {
@@ -728,18 +799,16 @@ impl Accounting {
                     (None, Some(b)) => Some(b),
                     (Some(a), None) => Some(a),
                     (Some((an, _ai)), Some((bn, bi))) if bn > an => {
-                        // println!("CHOICE: 9");
                         Some((bn, bi))
                     },
                     (Some((an, ai)), Some((_bn, _bi))) => {
-                        // println!("CHOICE: 10");
                         Some((an, ai))
                     },
                     (None, None) => None,
                 }
             }
             _ => {
-                panic!("Both a TAP and a SINK?");
+                panic!("Both a TAP and a SINK? {:?}", &status);
             }
         }
 
