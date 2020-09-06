@@ -1,0 +1,5 @@
+TOO_COLD: 12 + 5: 17
+TOO_HOT: 56 + 22 + 66: 144
+TOO_COLD: 54: 54
+JUST_RIGHT: 4 + 51 + 2 + 33: 90
+TOO_COLD: 1 + 1 + 1: 3

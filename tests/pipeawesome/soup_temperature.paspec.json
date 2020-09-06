@@ -1,0 +1,29 @@
+{
+  "commands": [
+    {
+      "name": "CAT",
+      "src": [],
+      "spec": {
+        "command": "cat",
+        "args": [ "tests/pipeawesome/soup_temperature.input.txt" ]
+      }
+    },
+    {
+      "name": "MATHS",
+      "src": [ { "name": "CAT", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "args": [ "{ cmd = \"echo \"$0\" | bc\" ; cmd | getline res ; close(cmd); print INPUT\": \"$0\": \"res; fflush() }"]
+      }
+    },
+    {
+      "name": "QUALITY_CONTROL",
+      "src": [ { "name": "MATHS", "port": "OUT" } ],
+      "spec": {
+        "command": "awk",
+        "args": [ "BEGIN { FS=\":\" }{ if ($3 < 88) print \"TOO_COLD:\"$2\":\"$3; else if ($3 > 93) print \"TOO_HOT:\"$2\":\"$3; else print \"JUST_RIGHT:\"$2\":\"$3; fflush() }" ]
+      }
+    }
+  ],
+  "outputs": { "OUTPUT": [ { "name": "QUALITY_CONTROL", "port": "OUT" } ] }
+}
