@@ -984,7 +984,7 @@ pub struct Config<LS> {
 
 #[derive(Debug, Deserialize)]
 pub struct JSONConfig {
-    pub outputs: HashMap<String, Vec<JSONTarget>>,
+    pub outputs: Option<HashMap<String, Vec<JSONTarget>>>,
     pub commands: Vec<JSONCommandDesire>,
 }
 
@@ -1055,11 +1055,16 @@ fn test_find_taps() {
 }
 
 impl JSONConfig {
-    pub fn convert_to_config(mut self) -> Config<JSONLaunchSpec> {
+    pub fn convert_to_config(self) -> Config<JSONLaunchSpec> {
 
         let tap_names: BTreeSet<String> = find_taps(&self.commands);
+        
+        let mut outputs = match self.outputs {
+            Some(o) => o,
+            None => HashMap::new(),
+        };
 
-        let outputs: BTreeMap<String, Vec<Source>> = self.outputs.drain().map(|(k, jtargets)| {
+        let outputs: BTreeMap<String, Vec<Source>> = outputs.drain().map(|(k, jtargets)| {
             (k, jtargets.into_iter().map(|jt| {
                 let spec_type = if tap_names.contains(&jt.name) {
                         SpecType::TapSpec
