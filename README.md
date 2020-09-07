@@ -1,87 +1,205 @@
-## To start a project
+# Pipeawesome
 
+## As my mum would say... accusingly... "WHAT did YOU do?!?!?!"
+
+I added loops, branches and joins to UNIX pipes.
+
+## Why?
+
+### My plan is
+
+I have recently created two projects:
+
+ * [eSQLate](https://github.com/forbesmyester/esqlate) - A relatively successful web front end for parameterized SQL queries.
+ * [WV Linewise](https://github.com/forbesmyester/wv-linewise) - A pretty much ignored way to put a [web-view](https://github.com/Boscop/web-view) in the middle of a UNIX pipeline.
+
+My plan is to join these two pieces of software together so eSQLate no longer has to run as a web service, but more like ordinary locally installed software.
+
+### A more graphical explanation
+
+A more exciting and / or immediate way to describe my idea is to thinking of a simple turn based strategy game like the below where the lines are actually UNIX pipes.
+
+```dot
+digraph {
+    rankdir = LR;
+    player_1 [label="player 1" color="red"]
+    player_2 [label="player 2" color="blue"]
+    player_1 -> engine -> player_2 -> engine -> player_1
+}
 ```
-./maths | head -n 25 | ./target/debug/pipeawesome -p ./pad_to_8.paspec.json  -t FAUCET=- -s OUTPUT=- 
+
+Of course, on a single machine this would practically be a turn based game as the display would be in different windows. But it would be trivial to run add SSH as an option for as part of this to make this into a real time game:
+
+```dot
+digraph G {
+    
+  subgraph cluster_1 {
+    p1_wvlinewise
+    label = "player #1";
+    color=red
+  }
+  
+  subgraph cluster_2 {
+    p2_wvlinewise
+    label = "player #2";
+    color=blue
+  }
+
+  subgraph cluster_3 {
+    p3_wvlinewise
+    label = "player #3";
+    color=green
+  }
+  
+  p1_wvlinewise [label="WV Linewise"]
+  p2_wvlinewise [label="WV Linewise"]
+  p3_wvlinewise [label="WV Linewise"]
+
+  
+  p1_wvlinewise -> server [label="SSH"]
+  p2_wvlinewise -> server [label="SSH"]
+  p3_wvlinewise -> server [label="SSH"]
+  
+  server -> p1_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  server -> p2_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  server -> p3_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  
+  server [shape=square];
+  
+}
 ```
 
-    pipeawesome configuration_file
+### The broader plan
 
-Will start pipeawesome. If either of `control_fifo` or `orphan_fifo` are not specified they will be created and reported.
+Imagine we are writing server software. It seems we could use this to read from a distributed queue, do a series of steps and put them back onto some other queue... we'd in effect have microservices! To me this idea seems to have real benefits.
 
-Lines which are piped into `pipeawesome` will enter the `INPUT` stream, be processed by multiple `PROCESSORS` and then lines get to `OUTPUT` stream they will be piped out of `pipeawesome`.
+## More Detail
 
-    INPUT -> FIFO -> PROCESSOR -> FIFO -> PROCESSOR -> FIFO -> OUTPUT
+### UNIX pipes are wonderful.
+
+When we can use UNIX pipes it often means we can write much less code and, if we're honest, the end result is much faster in both development time and execution speed.
+
+Given an example command `aws sqs recieve-message-or-similar ... | jq ... | CMD1 ... | CMD2 | jq ... | aws sqs send-message-or-similar ...`we can immediately tell what it does. There's a kind of purity and ease of understanding that is wonderful...
+
+### But they only go so far...
+
+The above example raises the following questions:
+
+ * What happens when we receive an invalid message?
+ * If I have some restructuring to do, for example send some (or invalid) requests to a different queue for analysis, it is unclear how this should be achieved.
+
+It seems to continue to develop this pipeline I will probably need to re-write it in a programming language because the following are difficult on the command line:
+
+ * Branching
+ * Joining
+ * Loops
+
+I find this a little sad because we're throwing away:
+
+ * A really high performance method of pushing data which gives us back-pressure and buffering for free.
+ * We're likely going to write one big binary and it's then much less obvious what it does and how it works. It will also likely have far more code and cost more produce.
+
+### Are UNIX pipelines microservices?
+
+There has been a big push towards microservices and these are often wired together using Queues. This got me thinking:
+
+ 1. Are UNIX pipes actually Queues?
+ 2. Can we view individual programs as microservices?
+
+For me, while there are caveats, the answers to these questions is YES. I also believe that it would be cheaper, more reliable and faster to build (some) software in this way.
+
+### That's great... I think... but how would we structure the command?
+
+The first thing I started looking at was how would I want to structure the command. I came to the following conclusions:
+
+ * It is pretty difficult to think of a way to express branching on a single line, let alone joins and loops.
+ * Even if we could come up with some syntax, it would also have to be read by humans. More than one `if`/`loop` on a single line and it becomes really difficult.
+
+It seems that when doing diagrams to describe what I want to achieve I usually use [Graphviz DOT](https://www.graphviz.org/doc/info/lang.html) and I even thought about using that as a file format for a while:
 
 
+```dot
+digraph {
+    0 [ label = "aws-sqs-recieve-message" ]
+    2 [ label = "jq ..." ]
+    4 [ label = "CMD1 ..." ]
+    7 [ label = "CMD2" ]
+    9 [ label = "jq ..." ]
+    11 [ label = "aws-sqs-send-message" ]
+    12 [ label = "aws-sqs-send-error" ]
+    0 -> 2 -> 4 -> 7 -> 9 -> 11
+    4 -> 12 [style="dashed"]
+}
+```
 
-## Example
+Thinking about Graphviz lead me to the revelation that we do actually want to use a directed graph to a key building block.  In the end I designed a JSON (groan) file format as it is somewhat easy to parse for both humans and computers.
 
-jo control=ADD stream=STDIN source=INPUT destination=PRE command=awk args="$(jo -a '{ printf "INPUT: "$1": 0" }')" > config.pa
-jo control=ADD stream=STDIN source=PRE destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ printf "$1:"$2": "; print $2 | "bc" }')" > config.pa
-jo control=ADD stream=STDIN source=MATHS destination=QUALITY_CONTROL command=awk args="$(jo -a 'BEGIN { FS=":" }{ if ($3 &lt; 50) print "COLD:"$2":"$3; else if ($3 == 50) print "RIGHT:"$2": 50"; else print "HOT:"$2":"$3 }' )" > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=FAIL_COLD command=grep args=$(jo -a '^COLD') > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=FAIL_HOT command=grep args=$(jo -a '^HOT') > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=JUST_RIGHT command=grep args=$(jo -a '^RIGHT') > config.pa
-jo control=ADD stream=STDIN source=FAIL_HOT destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ print $1": "$2" - 1: 0" }')" > config.pa
-jo control=ADD stream=STDIN source=FAIL_COLD destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ print $1": "$2" + 5: 0" }')" > config.pa
-jo control=OUT stream=STDIN source=JUST_RIGHT pre='OUT: '
+### So what's in the configuration file and how do I run it?
 
-    $ echo '3 + 4' | pipeawesome pipeawesome.conf
+For simple, and even at it's most complicated, the configuration looks like the following:
 
-    OUTPUT: STDOUT: JUST_RIGHT: 3 + 4 + 15 + 15 + 15 - 1 - 1: 50
+```json
+{
+  "commands": [
+    {
+      "name": "CAT",
+      "src": [],
+      "spec": {
+        "command": "cat",
+        "args": [ "tests/pipeawesome/soup_temperature.input.txt" ]
+      }
+    },
+    {
+      "name": "MATHS",
+      "src": [ { "name": "CAT", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "args": [ "{ cmd = \"echo \"$0\" | bc\" ; cmd | getline res ; close(cmd); print INPUT\": \"$0\": \"res; fflush() }"]
+      }
+    },
+    {
+      "name": "QUALITY_CONTROL",
+      "src": [ { "name": "MATHS", "port": "OUT" } ],
+      "spec": {
+        "command": "awk",
+        "args": [ "BEGIN { FS=\":\" }{ if ($3 < 88) print \"TOO_COLD:\"$2\":\"$3; else if ($3 > 93) print \"TOO_HOT:\"$2\":\"$3; else print \"JUST_RIGHT:\"$2\":\"$3; fflush() }" ]
+      }
+    }
+  ],
+  "outputs": { "OUTPUT": [ { "name": "QUALITY_CONTROL", "port": "OUT" } ] }
+}
+```
 
-## Specifications
+In this file format:
 
-### Tap
+ * Outputs are listed in the `outputs` property of the JSON file.
+ * Inputs are simply found by finding the "src"'s of the commands which are themselves not commands. If for example "CAT" did not exist in the example above it would become an input and would need to be specified.
 
-![](./b9f1b50e58de5c6ddd395bfb897f69bb7555c4e5.svg "`dot` image")
+To execute the file above you would use the following command:
 
-#### 1
+```sh
+pipeawesome --pipeline tests/pipeawesome/soup_temperature.paspec.json -output OUTPUT=- 
+```
 
-`tx` -> Err - OutputFull
-`tx` -> Ok - If sent None - ExhaustedInput
+As this file format forms a directed graph. Therefore:
 
-#### 2 - Loop
+ * If you want to do a branch, you just list multiple commands coming from the same "src".
+ * If you want to do a join you have one command with multiple "src".
+ * Loops are achieved by a branch and a join back onto itself.
 
-`int_rx` Ok(line) - Puts data in `pending` and performs `1`
-`int_rx` Err(\_) - Waiting
+The only other thing to note is that commands have three outputs "OUT" "ERR" and "EXIT". Which are STDOUT, STDERR and the exit status of a command.
 
-### Sink
+### Special note about loops
 
-![](./f2c439736bde9f607a8cb0641c4cd4a66b77a4c0.svg "`dot` image")
+Pipeawesome will exit when all outputs (or commands which have no outbound connections) have been closed (or exited).
 
-#### 1 - First step is to process pending
+When a command (or input) finishes/exits (closes) it will pass this fact onto the downstream child commands (and outputs), but if a command has two or more inputs, it will only be notified when all of it's inputs are closed.
 
-`int_tx` try_send -> Err(_): OutputFull
-`int_tx` try_send -> Ok(sent): If sent None ExhaustedInput
+This means that a loop which has no commands that exit themselves will not finish because the bit that feeds back onto itself will never close.
 
-#### 2 - If something has just moved out of pending
+To handle this situation, which you may not even want to do if writing server-like software, you'll need to add something past the join point which closes itself based on messages.
 
-`rx` Ok(line) - Puts data in `pending` and performs `1`
-`rx` Err(\_) - Waiting
+###
 
-### Buffer
+If I wanted to add branching, joining and loops to this command, but all the solutions I know of add either a lot of ugliness or split the command over multiple lines. In all situations the complexity level jumps more than I feel it should.
 
-![](./1fc2e454117f3a11be4ac4aa9a0d9583bee15f3c.svg "`dot` image")
-
-#### 1 - Sending data out, if possible
-
-After send attempt, if something left in `partially_sent` then: OutputFull
-Then if no inputs left then ExhaustedInput.
-
-#### 2 - Pulling data in from externally
-
-`input` try_recv -> Err(Empty) - Waiting
-`input` try_recv -> Err(Disconnected) - panic!
-
-### Command
-
-![](./a9e226096873864b1101727de5f1b7486b0298a2.svg "`dot` image")
-
-#### 1 - Moving items to pending
-
-If `stdin_rx.try_recv`, `inner_stdout_rx.try_recv()` and `inner_stderr_rx.try_recv()` all failed we will exit with Waiting, but only if nothing happens in 2
-
-#### 2 - Processing Pending
-
-If we could not write to `inner_stdin_tx` then we exit with `InternallyFull` unless we cannot write to `stdout_tx` or `stderr_tx` where we would exit with `OutputFull`
