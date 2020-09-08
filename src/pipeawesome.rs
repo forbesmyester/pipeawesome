@@ -51,12 +51,12 @@ impl std::fmt::Display for ConstructionError {
 }
 
 
-fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIndex) {
+fn strip_prequel_from_graph(graph: &mut TheGraph, substrs: Vec<&str>, current: petgraph::graph::NodeIndex) {
 
-    fn strip_ports_from_graph_iter(graph: &mut TheGraph, current: petgraph::graph::NodeIndex) -> Vec<petgraph::graph::NodeIndex>  {
+    fn strip_prequel_from_graph_iter(graph: &mut TheGraph, substr: &str, current: petgraph::graph::NodeIndex) -> (bool, Vec<petgraph::graph::NodeIndex>) {
 
-        let (incoming, outgoing): (Vec<petgraph::graph::NodeIndex>, Vec<petgraph::graph::NodeIndex>) = match graph[current].get(0..1) {
-            Some("P") => {
+        let (incoming, outgoing): (Vec<petgraph::graph::NodeIndex>, Vec<petgraph::graph::NodeIndex>) = match &graph[current].get(0..substr.len()) {
+            Some(id) if id == &substr => {
                 (
                     graph.neighbors_directed(current, Direction::Incoming).collect(),
                     graph.neighbors(current).collect()
@@ -66,12 +66,12 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
                 ( vec![], graph.neighbors(current).collect() )
             }
             None => {
-                panic!("strip_ports_from_graph({:?}) current could not be found in graph", current);
+                panic!("strip_prequel_from_graph({:?}) current could not be found in graph", current);
             }
         };
 
         if incoming.is_empty() {
-            return outgoing;
+            return (false, outgoing);
         }
 
         for i in &incoming {
@@ -82,20 +82,41 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
 
         graph.remove_node(current);
 
-        outgoing
+        (true, outgoing)
     }
 
-    let mut todo: Vec<petgraph::graph::NodeIndex> = strip_ports_from_graph_iter(graph, current);
+    let mut todo: Vec<petgraph::graph::NodeIndex> = vec![];
+    let mut removed = false;
+
+    for s in &substrs {
+        if !removed {
+            let (have_removed, to_add) = strip_prequel_from_graph_iter(graph, s, current);
+            removed = have_removed;
+            for ta in to_add {
+                if !todo.contains(&ta) {
+                    todo.push(ta);
+                }
+            }
+        }
+    }
+
+    removed = false;
 
     let mut i = 0;
     while i < todo.len() {
         let t = todo[i];
-        let to_add = strip_ports_from_graph_iter(graph, t);
-        for ta in to_add {
-            if !todo.contains(&ta) {
-                todo.push(ta);
+        for s in &substrs {
+            if !removed {
+                let (have_removed, to_add) = strip_prequel_from_graph_iter(graph, s, t);
+                removed = have_removed;
+                for ta in to_add {
+                    if !todo.contains(&ta) {
+                        todo.push(ta);
+                    }
+                }
             }
         }
+        removed = false;
         i += 1;
     }
 
@@ -103,7 +124,7 @@ fn strip_ports_from_graph(graph: &mut TheGraph, current: petgraph::graph::NodeIn
 
 
 #[test]
-fn test_strip_ports_from_graph() {
+fn test_strip_prequel_from_graph() {
 
     let mut graph = petgraph::stable_graph::StableGraph::<String, u32, petgraph::Directed, u32>::new();
     let faucet = graph.add_node("C#T#FAUCET".to_owned());
@@ -123,8 +144,9 @@ fn test_strip_ports_from_graph() {
         (cmd_port_in, cmd, 7),
     ]);
 
-    strip_ports_from_graph(&mut graph, faucet);
-    assert_eq!((3, 2), (graph.node_count(), graph.edge_count()));
+    strip_prequel_from_graph(&mut graph, vec!["P", "C#B#"], faucet);
+    println!("{}", Dot::new(&graph));
+    assert_eq!((2, 1), (graph.node_count(), graph.edge_count()));
 
 }
 
@@ -599,7 +621,7 @@ fn main() {
     if opts.graph {
         let taps = find_graph_taps(&identified.graph);
         for t in taps {
-            strip_ports_from_graph(&mut identified.graph, t);
+            strip_prequel_from_graph(&mut identified.graph, vec!["P", "C#B#", "C#J#"], t);
         }
         println!("{}", Dot::new(&identified.graph));
         std::process::exit(0);
@@ -730,6 +752,7 @@ fn main() {
                         *control_index = rec_control_index;
                     },
                     _ => {
+                        // println!("SE: {:?}\nAC: {:?}\n\n", &starts_and_ends.iter().map(|x| accounting.get_control(*x)).collect::<Vec<Option<&Control>>>(), &accounting.get_finished().iter().map(|x| accounting.get_control(*x)).collect::<Vec<Option<&Control>>>());
                         let should_exit = starts_and_ends
                             .difference(&accounting.get_finished())
                             .next()
