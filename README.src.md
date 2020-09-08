@@ -1,249 +1,205 @@
-## To start a project
+# Pipeawesome
 
-    pipeawesome configuration_file
+## As my mum would say... accusingly... "WHAT did YOU do?!?!?!"
 
-Will start pipeawesome. If either of `control_fifo` or `orphan_fifo` are not specified they will be created and reported.
+I added loops, branches and joins to UNIX pipes.
 
-Lines which are piped into `pipeawesome` will enter the `INPUT` stream, be processed by multiple `PROCESSORS` and then lines get to `OUTPUT` stream they will be piped out of `pipeawesome`.
+## Why?
 
-```
-INPUT -> FIFO -> PROCESSOR -> FIFO -> PROCESSOR -> FIFO -> OUTPUT
-```
+### My plan is
 
-## Example
+I have recently created two projects:
 
-jo control=ADD stream=STDIN source=INPUT destination=PRE command=awk args="$(jo -a '{ printf "INPUT: "$1": 0" }')" > config.pa
-jo control=ADD stream=STDIN source=PRE destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ printf "$1:"$2": "; print $2 | "bc" }')" > config.pa
-jo control=ADD stream=STDIN source=MATHS destination=QUALITY_CONTROL command=awk args="$(jo -a 'BEGIN { FS=":" }{ if ($3 < 50) print "COLD:"$2":"$3; else if ($3 == 50) print "RIGHT:"$2": 50"; else print "HOT:"$2":"$3 }' )" > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=FAIL_COLD command=grep args=$(jo -a '^COLD') > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=FAIL_HOT command=grep args=$(jo -a '^HOT') > config.pa
-jo control=ADD stream=STDIN source=QUALITY_CONTROL destination=JUST_RIGHT command=grep args=$(jo -a '^RIGHT') > config.pa
-jo control=ADD stream=STDIN source=FAIL_HOT destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ print $1": "$2" - 1: 0" }')" > config.pa
-jo control=ADD stream=STDIN source=FAIL_COLD destination=MATHS command=awk args="$(jo -a 'BEGIN { FS=":" }{ print $1": "$2" + 5: 0" }')" > config.pa
-jo control=OUT stream=STDIN source=JUST_RIGHT pre='OUT: '
+ * [eSQLate](https://github.com/forbesmyester/esqlate) - A relatively successful web front end for parameterized SQL queries.
+ * [WV Linewise](https://github.com/forbesmyester/wv-linewise) - A pretty much ignored way to put a [web-view](https://github.com/Boscop/web-view) in the middle of a UNIX pipeline.
 
-```
-$ echo '3 + 4' | pipeawesome pipeawesome.conf
+My plan is to join these two pieces of software together so eSQLate no longer has to run as a web service, but more like ordinary locally installed software.
 
-OUTPUT: STDOUT: JUST_RIGHT: 3 + 4 + 15 + 15 + 15 - 1 - 1: 50
-```
+### A more graphical / exciting explanation
 
-## Specifications
-
-### Tap
+A more exciting and / or exciting way to describe my idea is to thinking of a simple turn based strategy game like the below where the lines are actually UNIX pipes.
 
 ```dot
-digraph G {
-
-    rankdir="LR";
-
-    subgraph cluster_tap {
-        label = "tap";
-        color=lightgrey;
-
-        subgraph cluster_tap_thread {
-            label="thread"
-            tap_handle [shape=Mdiamond, label=handle]
-            tap_int_tx [label=int_tx]
-        }
-        tap_int_rx [label=int_rx]
-        tap_tx [label=tx]
-        tap_pending [label=pending]
-
-        tap_handle -> tap_int_tx
-        tap_int_tx -> tap_int_rx
-        tap_int_rx -> tap_pending [style=dashed, label=2, arrowhead=box]
-        tap_tx -> tap_pending [style=dashed, label=1, arrowhead=box]
-        tap_pending -> tap_tx
-
-    }
-
-    tap_rx [shape=point]
-    tap_tx -> tap_rx
-
+digraph {
+    rankdir = LR;
+    player_1 [label="player 1" color="red"]
+    player_2 [label="player 2" color="blue"]
+    player_1 -> engine -> player_2 -> engine -> player_1
 }
 ```
 
-#### 1
-
-`tx` -> Err - OutputFull
-`tx` -> Ok - If sent None - ExhaustedInput
-
-#### 2 - Loop
-
-`int_rx` Ok(line) - Puts data in `pending` and performs `1`
-`int_rx` Err(_) - Waiting
-
-### Sink
+Of course, on a single machine this would practically be a turn based game as the display would be in different windows. But it would be trivial to run add SSH as an option for as part of this to make this into a real time game:
 
 ```dot
 digraph G {
+    
+  subgraph cluster_1 {
+    p1_wvlinewise
+    label = "player #1";
+    color=red
+  }
+  
+  subgraph cluster_2 {
+    p2_wvlinewise
+    label = "player #2";
+    color=blue
+  }
 
-    rankdir="LR";
+  subgraph cluster_3 {
+    p3_wvlinewise
+    label = "player #3";
+    color=green
+  }
+  
+  p1_wvlinewise [label="WV Linewise"]
+  p2_wvlinewise [label="WV Linewise"]
+  p3_wvlinewise [label="WV Linewise"]
 
-    subgraph cluster_sink {
-        label = "sink";
-        color=lightgrey;
-
-        subgraph cluster_sink_thread {
-            label="thread"
-            sink_handle [shape=Mdiamond, label=handle]
-            sink_int_rx [label=int_tx]
-        }
-        sink_int_tx [label=int_tx]
-        sink_pending [label=pending]
-
-        sink_pending -> sink_int_tx [style=dashed, arrowhead=box, label=1]
-        sink_int_tx -> sink_int_rx -> sink_handle
-        sink_rx -> sink_pending [style=dashed, arrowhead=box, label=2]
-
-    }
-
-    sink_tx [shape=point]
-    sink_tx -> sink_rx
-
+  
+  p1_wvlinewise -> server [label="SSH"]
+  p2_wvlinewise -> server [label="SSH"]
+  p3_wvlinewise -> server [label="SSH"]
+  
+  server -> p1_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  server -> p2_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  server -> p3_wvlinewise [style="dashed", margin = "0.20,0.05"]
+  
+  server [shape=square];
+  
 }
-
 ```
 
-#### 1 - First step is to process pending
+### The broader plan
 
-`int_tx` try_send -> Err(_): OutputFull
-`int_tx` try_send -> Ok(sent): If sent None ExhaustedInput
+Imagine we are writing server software. It seems we could use this to read from a distributed queue, do a series of steps and put them back onto some other queue... we'd in effect have microservices! To me this idea seems to have real benefits.
 
-#### 2 - If something has just moved out of pending
+## More Detail
 
-`rx` Ok(line) - Puts data in `pending` and performs `1`
-`rx` Err(_) - Waiting
+### UNIX pipes are wonderful.
 
-### Buffer
+When we can use UNIX pipes it often means we can write much less code and, if we're honest, the end result is much faster in both development time and execution speed.
+
+Given an example command `aws sqs recieve-message-or-similar ... | jq ... | CMD1 ... | CMD2 | jq ... | aws sqs send-message-or-similar ...`we can immediately tell what it does. There's a kind of purity and ease of understanding that is wonderful...
+
+### But they only go so far...
+
+The above example raises the following questions:
+
+ * What happens when we receive an invalid message?
+ * If I have some restructuring to do, for example send some (or invalid) requests to a different queue for analysis, it is unclear how this should be achieved.
+
+It seems to continue to develop this pipeline I will probably need to re-write it in a programming language because the following are difficult on the command line:
+
+ * Branching
+ * Joining
+ * Loops
+
+I find this a little sad because we're throwing away:
+
+ * A really high performance method of pushing data which gives us back-pressure and buffering for free.
+ * We're likely going to write one big binary and it's then much less obvious what it does and how it works. It will also likely have far more code and cost more produce.
+
+### Are UNIX pipelines microservices?
+
+There has been a big push towards microservices and these are often wired together using Queues. This got me thinking:
+
+ 1. Are UNIX pipes actually Queues?
+ 2. Can we view individual programs as microservices?
+
+For me, while there are caveats, the answers to these questions is YES. I also believe that it would be cheaper, more reliable and faster to build (some) software in this way.
+
+### That's great... I think... but how would we structure the command?
+
+The first thing I started looking at was how would I want to structure the command. I came to the following conclusions:
+
+ * It is pretty difficult to think of a way to express branching on a single line, let alone joins and loops.
+ * Even if we could come up with some syntax, it would also have to be read by humans. More than one `if`/`loop` on a single line and it becomes really difficult.
+
+It seems that when doing diagrams to describe what I want to achieve I usually use [Graphviz DOT](https://www.graphviz.org/doc/info/lang.html) and I even thought about using that as a file format for a while:
+
 
 ```dot
-digraph G {
-
-    rankdir="LR";
-
-    subgraph cluster_buffer {
-        label = "buffer";
-        color=lightgrey;
-
-        buffer_input_1 [label=input]
-        buffer_input_2 [label=input]
-        buffer_pending [label="pending(pos, line)"]
-        buffer_output_1 [label=output]
-        buffer_output_2 [label=output]
-
-        buffer_input_1 -> buffer_pending
-        buffer_input_2 -> buffer_pending
-        buffer_pending -> buffer_output_1
-        buffer_output_1 -> buffer_pending [style=dashed, arrowhead=box, label=1]
-        buffer_pending -> buffer_output_2
-
-    }
-
-    buffer_input_1_in [shape=point]
-    buffer_input_2_in [shape=point]
-    buffer_output_1_out [shape=point]
-    buffer_output_2_out [shape=point]
-
-    buffer_input_1_in -> buffer_input_1 [style="dashed" label=2, arrowhead=box]
-    buffer_input_2_in -> buffer_input_2 [style="dashed" label=2, arrowhead=box]
-    buffer_output_1 -> buffer_output_1_out
-    buffer_output_2 -> buffer_output_2_out
-
-}
-
-
-```
-
-#### 1 - Sending data out, if possible
-
-After send attempt, if something left in `partially_sent` then: OutputFull
-Then if no inputs left then ExhaustedInput.
-
-#### 2 - Pulling data in from externally
-
-`input` try_recv -> Err(Empty) - Waiting
-`input` try_recv -> Err(Disconnected) - panic!
-
-### Command
-
-```dot
-digraph G {
-
-    subgraph cluster_command {
-        label = "command";
-        color=lightgrey;
-
-        subgraph cluster_command_stdin_thread {
-            label="thread stdin"
-            command_stdin [shape=Mdiamond, label=stdin]
-            command_inner_stdin_rx [label=inner_stdin_rx]
-            command_inner_stdin_rx -> command_stdin
-        }
-
-        command_inner_stdin_tx [label=inner_stdin_tx]
-        command_pending_stdin [label=pending_stdin]
-        command_stdin_rx [label=stdin_rx]
-
-        command_pending_stdin -> command_inner_stdin_tx
-        command_inner_stdin_tx -> command_pending_stdin [style="dashed", label=1, arrowhead=box]
-        command_inner_stdin_tx -> command_inner_stdin_rx
-        command_stdin_rx -> command_pending_stdin [style="dashed", label=2, arrowhead=box]
-
-        subgraph cluster_command_stdout_thread {
-            label="thread stdout"
-
-            command_stdout [shape=Mdiamond, label=stdout]
-            command_inner_stdout_tx [label=inner_stdout_tx]
-
-            command_stdout -> command_inner_stdout_tx
-        }
-
-        command_stdout_tx [label=stdout_tx]
-        command_pending_stdout [label=pending_stdout]
-        command_inner_stdout_rx [label=inner_stdout_rx]
-
-        command_pending_stdout -> command_stdout_tx
-        command_stdout_tx -> command_pending_stdout [style="dashed", label=1, arrowhead=box]
-        command_inner_stdout_rx -> command_pending_stdout [style="dashed", label=2, arrowhead=box]
-        command_inner_stdout_tx -> command_inner_stdout_rx
-
-        subgraph cluster_command_stderr_thread {
-            label="thread stderr"
-
-            command_stderr [shape=Mdiamond, label=stderr]
-            command_inner_stderr_tx [label=inner_stderr_tx]
-
-            command_stderr -> command_inner_stderr_tx
-        }
-
-        command_stderr_tx [label=stderr_tx]
-        command_pending_stderr [label=pending_stderr]
-        command_inner_stderr_rx [label=inner_stderr_rx]
-
-        command_pending_stderr -> command_stderr_tx
-        command_stderr_tx -> command_pending_stderr [style="dashed", label=1, arrowhead=box]
-        command_inner_stderr_rx -> command_pending_stderr [style="dashed", label=2, arrowhead=box]
-        command_inner_stderr_tx -> command_inner_stderr_rx
-
-    }
-
-    command_stdout_rx [shape=point]
-    command_stderr_tx -> command_stderr_rx
-    command_stderr_rx [shape=point]
-    command_stdout_tx -> command_stdout_rx
-    command_stdin_tx [shape=point]
-    command_stdin_tx -> command_stdin_rx
-
+digraph {
+    0 [ label = "aws-sqs-recieve-message" ]
+    2 [ label = "jq ..." ]
+    4 [ label = "CMD1 ..." ]
+    7 [ label = "CMD2" ]
+    9 [ label = "jq ..." ]
+    11 [ label = "aws-sqs-send-message" ]
+    12 [ label = "aws-sqs-send-error" ]
+    0 -> 2 -> 4 -> 7 -> 9 -> 11
+    4 -> 12 [style="dashed"]
 }
 ```
 
-#### 1 - Moving items to pending
+Thinking about Graphviz lead me to the revelation that we do actually want to use a directed graph to a key building block.  In the end I designed a JSON (groan) file format as it is somewhat easy to parse for both humans and computers.
 
-If `stdin_rx.try_recv`, `inner_stdout_rx.try_recv()` and `inner_stderr_rx.try_recv()` all failed we will exit with Waiting, but only if nothing happens in 2
+### So what's in the configuration file and how do I run it?
 
-#### 2 - Processing Pending
+For simple, and even at it's most complicated, the configuration looks like the following:
 
-If we could not write to `inner_stdin_tx` then we exit with `InternallyFull` unless we cannot write to `stdout_tx` or `stderr_tx` where we would exit with `OutputFull`
+```json
+{
+  "commands": [
+    {
+      "name": "CAT",
+      "src": [],
+      "spec": {
+        "command": "cat",
+        "args": [ "tests/pipeawesome/soup_temperature.input.txt" ]
+      }
+    },
+    {
+      "name": "MATHS",
+      "src": [ { "name": "CAT", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "args": [ "{ cmd = \"echo \"$0\" | bc\" ; cmd | getline res ; close(cmd); print INPUT\": \"$0\": \"res; fflush() }"]
+      }
+    },
+    {
+      "name": "QUALITY_CONTROL",
+      "src": [ { "name": "MATHS", "port": "OUT" } ],
+      "spec": {
+        "command": "awk",
+        "args": [ "BEGIN { FS=\":\" }{ if ($3 < 88) print \"TOO_COLD:\"$2\":\"$3; else if ($3 > 93) print \"TOO_HOT:\"$2\":\"$3; else print \"JUST_RIGHT:\"$2\":\"$3; fflush() }" ]
+      }
+    }
+  ],
+  "outputs": { "OUTPUT": [ { "name": "QUALITY_CONTROL", "port": "OUT" } ] }
+}
+```
+
+In this file format:
+
+ * Outputs are listed in the `outputs` property of the JSON file.
+ * Inputs are simply found by finding the "src"'s of the commands which are themselves not commands. If for example "CAT" did not exist in the example above it would become an input and would need to be specified.
+
+To execute the file above you would use the following command:
+
+```sh
+pipeawesome --pipeline tests/pipeawesome/soup_temperature.paspec.json -output OUTPUT=- 
+```
+
+As this file format forms a directed graph. Therefore:
+
+ * If you want to do a branch, you just list multiple commands coming from the same "src".
+ * If you want to do a join you have one command with multiple "src".
+ * Loops are achieved by a branch and a join back onto itself.
+
+The only other thing to note is that commands have three outputs "OUT" "ERR" and "EXIT". Which are STDOUT, STDERR and the exit status of a command.
+
+### Special note about loops
+
+Pipeawesome will exit when all outputs (or commands which have no outbound connections) have been closed (or exited).
+
+When a command (or input) finishes/exits (closes) it will pass this fact onto the downstream child commands (and outputs), but if a command has two or more inputs, it will only be notified when all of it's inputs are closed.
+
+This means that a loop which has no commands that exit themselves will not finish because the bit that feeds back onto itself will never close.
+
+To handle this situation, which you may not even want to do if writing server-like software, you'll need to add something past the join point which closes itself based on messages.
+
+###
+
+If I wanted to add branching, joining and loops to this command, but all the solutions I know of add either a lot of ugliness or split the command over multiple lines. In all situations the complexity level jumps more than I feel it should.
 
