@@ -1,0 +1,73 @@
+{
+  "commands": [
+    {
+      "name": "KITCHEN",
+      "src": [ { "name": "INGREDIENTS", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "path": ".",
+        "args": [ "BEGIN { FS=\":\" }{ print NR\": KITCHEN: \"$0\": 0\"; fflush(); }" ]
+      }
+    },
+    {
+      "name": "TEMPERATURE_CHECKER_MATHS",
+      "src": [
+        { "name": "KITCHEN", "port": "OUT" },
+        { "name": "LEAVING_TO_COOL", "port": "OUT" },
+        { "name": "ADDING_MORE_HEAT", "port": "OUT" }
+      ],
+      "spec": { "command": "gawk", "args": [ "BEGIN{FS=\":\"} { cmd = \"echo \"$3\" | bc\" ; cmd | getline res ; close(cmd); print $1\": \"$2\":\"$3\": \"res; fflush() }"] }
+    },
+    {
+      "name": "TEMPERATURE_CHECKER_QA",
+      "src": [ { "name": "TEMPERATURE_CHECKER_MATHS", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "args": [ "BEGIN { FS=\":\" }{ if ($4 < 88) print $1\": TOO_COLD:\"$3\":\"$4; else if ($4 > 93) print $1\": TOO_HOT:\"$3\":\"$4; else print $1\": JUST_RIGHT:\"$3\":\"$4; fflush() }" ]
+      }
+    },
+    {
+      "name": "JUST_RIGHT",
+      "src": [ { "name": "TEMPERATURE_CHECKER_QA", "port": "OUT" } ],
+      "spec": { "command": "grep", "args": [ "--line-buffered", "JUST_RIGHT" ] }
+    },
+    {
+      "name": "TOO_HOT_FILTER",
+      "src": [ { "name": "TEMPERATURE_CHECKER_QA", "port": "OUT" } ],
+      "spec": { "command": "grep", "args": [ "--line-buffered", "TOO_HOT" ] }
+    },
+    {
+      "name": "TOO_COLD_FILTER",
+      "src": [ { "name": "TEMPERATURE_CHECKER_QA", "port": "OUT" } ],
+      "spec": { "command": "grep", "args": [ "--line-buffered", "TOO_COLD" ], "env": { "POSIXLY_CORRECT": "1" } }
+    },
+    {
+      "name": "LEAVING_TO_COOL",
+      "src": [ { "name": "TOO_HOT_FILTER", "port": "OUT" } ],
+      "spec": { "command": "gawk", "args": [ "-v", "max=10", "-v", "min=1", "BEGIN { FS=\":\"; srand(seed) }{ print $1\": \"$2\":\"$3\" - \"int((rand() * (max - min)) + min)\": 0\"; fflush() }" ] }
+    },
+    {
+      "name": "ADDING_MORE_HEAT",
+      "src": [ { "name": "TOO_COLD_FILTER", "port": "OUT" } ],
+      "spec": { "command": "gawk", "args": [ "-v", "max=30", "-v", "min=5", "BEGIN { FS=\":\"; srand(seed) }{ print $1\": \"$2\":\"$3\" + \"int((rand() * (max - min)) + min)\": 0\"; fflush() }" ] }
+    },
+
+
+    {
+      "name": "ADD_REQUIRE",
+      "src": [ { "name": "KITCHEN", "port": "OUT" } ],
+      "spec": { "command": "sed", "args": [ "-u", "s/^\\([0-9]\\+\\).*/REQUIRE: ITEM: \\1/" ] }
+    },
+    {
+      "name": "ADD_REQUIRE_MARK_END",
+      "src": [ { "name": "ADD_REQUIRE", "port": "OUT" } ],
+      "spec": { "command": "sed", "args": [ "$aREQUIRE: END: " ] }
+    },
+    {
+      "name": "TERMINATOR",
+      "src": [ { "name": "ADD_REQUIRE_MARK_END", "port": "OUT" }, { "name": "JUST_RIGHT", "port": "OUT" } ],
+      "spec": { "command": "./target/debug/pipeawesome-terminator", "args": [ "--grace-period", "5", "--require-end", "REQUIRE: END", "--require-item-prequel", "REQUIRE: ITEM: ", "--line-regex", "^([^:]+).*", "--line-replace", "$1" ] }
+    }
+  ],
+  "outputs": { "RESTAURANT": [ { "name": "TERMINATOR", "port": "OUT" } ] }
+}

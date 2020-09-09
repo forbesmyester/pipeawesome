@@ -1,0 +1,13 @@
+{
+  "commands": [
+    {
+      "name": "TEMPERATURE_CHECKER",
+      "src": [ { "name": "KITCHEN", "port": "OUT" } ],
+      "spec": {
+        "command": "gawk",
+        "args": [ "BEGIN { FS=\":\" }{ if ($0 < 88) print \"TOO_COLD:\"$0; else if ($0 > 93) print \"TOO_HOT:\"$0; else print \"JUST_RIGHT:\"$0; fflush() }" ]
+      }
+    }
+  ],
+  "outputs": { "RESTAURANT": [ { "name": "TEMPERATURE_CHECKER", "port": "OUT" } ] }
+}

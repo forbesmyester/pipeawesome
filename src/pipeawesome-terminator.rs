@@ -24,12 +24,14 @@ fn get_opts() -> Opts {
             .required(true)
             .takes_value(true)
             .short("r")
+            .long("require-item-prequel")
             .help("If a line starts with this, it will be added as a requirement (depending on REPLACE_FOR_REQUIREMENET)")
         )
         .arg(ClapArg::with_name("require-end")
             .required(false)
             .takes_value(true)
             .short("e")
+            .long("require-end")
             .help("If a line starts with this, it signifies all requirements have been sent")
         )
         .arg(ClapArg::with_name("line-regex")
@@ -37,21 +39,20 @@ fn get_opts() -> Opts {
             .required(false)
             .takes_value(true)
             .short("l")
-            .value_name("LINE_REGEX")
-            .env("PIPEAWESOME_TERMINATOR_LINE_REGEX")
+            .long("line-regex")
         )
         .arg(ClapArg::with_name("line-replace")
             .help("what to replace LINE_REGEX with")
             .required(false)
             .takes_value(true)
             .short("p")
-            .value_name("LINE_REPLACE")
-            .env("PIPEAWESOME_TERMINATOR_LINE_REPLACE")
+            .long("line-replace")
         )
         .arg(ClapArg::with_name("grace-period")
             .help("grace period (seconds) to get more requirements after all requirements are met.")
             .takes_value(true)
             .short("g")
+            .long("grace-period")
             .env("PIPEAWESOME_TERMINATOR_GRACE_PERIOD")
             .validator(|s| {
                 let re = Regex::new(r"^[0-9]+$").unwrap();
@@ -60,7 +61,6 @@ fn get_opts() -> Opts {
                 }
                 Ok(())
             })
-            .value_name("GRACE_PERIOD")
         ).get_matches();
 
     Opts {
