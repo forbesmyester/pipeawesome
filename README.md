@@ -26,40 +26,63 @@ Imagine you own a restaurant and you want to check the temperature of soup as it
 
 This could be specified with the configuration file below:
 
-```json file=examples/temperature_prope.paspec.json
+```javascript file=examples/temperature_prope.paspec.json5
 {
   "commands": [
     {
-      "name": "TEMPERATURE_CHECKER",
-      "src": [ { "name": "KITCHEN", "port": "OUT" } ],
+      "name": "TEMPERATURE_CHECKER", // The command has a name, which is used to
+                                     // reference the command within this file
+
+      "src": [{                      // The command reads KITCHEN's (STD)OUT
+          "name": "KITCHEN",         // but as it does not exist it becomes an
+          "port": "OUT"              // "input" which must be specified on the
+      }],                            // command line.
+                                                       
       "spec": {
-        "command": "gawk",
-        "args": [ "BEGIN { FS=\":\" }{ if ($0 < 88) print \"TOO_COLD:\"$0; else if ($0 > 93) print \"TOO_HOT:\"$0; else print \"JUST_RIGHT:\"$0; fflush() }" ]
+        "command": "gawk", // The program to run followed by the arguments
+        "args": [' \
+            BEGIN { FS=":" } \
+            { \
+                if ($0 < 88) \
+                    print "TOO_COLD:"$0; \
+                else if ($0 > 93) \
+                    print "TOO_HOT:"$0; \
+                else \
+                    print "JUST_RIGHT:"$0; \
+                fflush(); \
+            } \
+            ' ]
       }
     }
   ],
-  "outputs": { "RESTAURANT": [ { "name": "TEMPERATURE_CHECKER", "port": "OUT" } ] }
+
+  "outputs": {                            // Data exits Pipeawesome through
+      "RESTAURANT": [{                    // "outputs" or via programs specified
+          "name": "TEMPERATURE_CHECKER",  // in "commands" writing thier own
+          "port": "OUT"                   // data to files (or other). Outputs
+      }]                                  // must be specified on the command line
+  }
 }
 ```
 
 To run this file you do the following:
 
 ```bash
-$ echo -e "44\n90\n92\n99\n33" | ./target/debug/pipeawesome \
-                                    -p examples/temperature_prope.paspec.json  \
-                                    -i KITCHEN=- \
-                                    -o RESTAURANT=-
+$  echo -e "44\n90\n92\n99\n33" | ./target/debug/pipeawesome \
+        -n -p "$(cat examples/temperature_prope.paspec.json5 | json5)" \
+        -i KITCHEN=- -o RESTAURANT=-
 TOO_COLD:44
 JUST_RIGHT:90
 JUST_RIGHT:92
 TOO_HOT:99
 TOO_COLD:33
-
 ```
 
-NOTE: `-o RESTAURANT=-` means the output "RESTAURANT" should go to STDOUT.
+NOTE 1: `-o RESTAURANT=-` means the output "RESTAURANT" should go to STDOUT.
 You can also use an underscore (`_`) to mean STDERR. If it is neither of
 these it will be interpreted as a filename which will be wrote to.
+
+NOTE 2: Without `-n` the `-p` parameter is a filename which must be valid JSON. I wanted to use JSON5 here so I could add meaningful comments, hence the `-n`, `-p` `cat` combination.
 
 ## An example which shows how real value could be realized.
 
@@ -199,19 +222,42 @@ The configuration file forms a directed graph.  In the end I designed a JSON (gr
 
 For simple, and even at it's most complicated, the configuration looks like the following:
 
-```json file=examples/temperature_prope.paspec.json
+```json file=examples/temperature_prope.paspec.json5
 {
   "commands": [
     {
-      "name": "TEMPERATURE_CHECKER",
-      "src": [ { "name": "KITCHEN", "port": "OUT" } ],
+      "name": "TEMPERATURE_CHECKER", // The command has a name, which is used to
+                                     // reference the command within this file
+
+      "src": [{                      // The command reads KITCHEN's (STD)OUT
+          "name": "KITCHEN",         // but as it does not exist it becomes an
+          "port": "OUT"              // "input" which must be specified on the
+      }],                            // command line.
+                                                       
       "spec": {
-        "command": "gawk",
-        "args": [ "BEGIN { FS=\":\" }{ if ($0 < 88) print \"TOO_COLD:\"$0; else if ($0 > 93) print \"TOO_HOT:\"$0; else print \"JUST_RIGHT:\"$0; fflush() }" ]
+        "command": "gawk", // The program to run followed by the arguments
+        "args": [' \
+            BEGIN { FS=":" } \
+            { \
+                if ($0 < 88) \
+                    print "TOO_COLD:"$0; \
+                else if ($0 > 93) \
+                    print "TOO_HOT:"$0; \
+                else \
+                    print "JUST_RIGHT:"$0; \
+                fflush(); \
+            } \
+            ' ]
       }
     }
   ],
-  "outputs": { "RESTAURANT": [ { "name": "TEMPERATURE_CHECKER", "port": "OUT" } ] }
+
+  "outputs": {                            // Data exits Pipeawesome through
+      "RESTAURANT": [{                    // "outputs" or via programs specified
+          "name": "TEMPERATURE_CHECKER",  // in "commands" writing thier own
+          "port": "OUT"                   // data to files (or other). Outputs
+      }]                                  // must be specified on the command line
+  }
 }
 ```
 

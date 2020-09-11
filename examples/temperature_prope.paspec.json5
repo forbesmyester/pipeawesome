@@ -1,0 +1,36 @@
+{
+  "commands": [
+    {
+      "name": "TEMPERATURE_CHECKER", // The command has a name, which is used to
+                                     // reference the command within this file
+
+      "src": [{                      // The command reads KITCHEN's (STD)OUT
+          "name": "KITCHEN",         // but as it does not exist it becomes an
+          "port": "OUT"              // "input" which must be specified on the
+      }],                            // command line.
+                                                       
+      "spec": {
+        "command": "gawk", // The program to run followed by the arguments
+        "args": [' \
+            BEGIN { FS=":" } \
+            { \
+                if ($0 < 88) \
+                    print "TOO_COLD:"$0; \
+                else if ($0 > 93) \
+                    print "TOO_HOT:"$0; \
+                else \
+                    print "JUST_RIGHT:"$0; \
+                fflush(); \
+            } \
+            ' ]
+      }
+    }
+  ],
+
+  "outputs": {                            // Data exits Pipeawesome through
+      "RESTAURANT": [{                    // "outputs" or via programs specified
+          "name": "TEMPERATURE_CHECKER",  // in "commands" writing thier own
+          "port": "OUT"                   // data to files (or other). Outputs
+      }]                                  // must be specified on the command line
+  }
+}
