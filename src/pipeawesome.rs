@@ -1,17 +1,9 @@
-// mod controls;
-// mod config;
-// mod accounting;
-// mod accounting_writer;
-// mod failed;
-// mod stdin_out;
-
 use std::thread::JoinHandle;
 use std::collections::HashSet;
 use petgraph::{ Direction };
 use petgraph::dot::Dot;
 use clap::{Arg as ClapArg, App as ClapApp};
 
-use std::path::Path;
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 
@@ -194,6 +186,7 @@ struct Opts {
     debug: u64,
     pipeline: String,
     tap: HashMap<String, TapMethod>,
+    inline: bool,
     sink: HashMap<String, SinkMethod>,
     accounting: Option<SinkMethod>,
     graph: bool,
@@ -207,6 +200,7 @@ fn get_opts() -> Opts {
         .about("Create wierd and wonderful pipe systems")
         .arg(ClapArg::with_name("graph")
             .help("Prints out the generated graph and exits")
+            .short("g")
             .required(false)
             .long("graph")
         )
@@ -216,8 +210,13 @@ fn get_opts() -> Opts {
             .takes_value(true)
             .short("p")
             .long("pipeline")
-            .value_name("PIPEAWESOME_PIPELINE_SPECIFICATION")
             .env("PIPEAWESOME_PIPELINE_SPECIFICATION")
+        )
+        .arg(ClapArg::with_name("inline")
+            .help("Treat the pipeline parameter as inline text as apposed to a filename")
+            .short("n")
+            .required(false)
+            .long("inline")
         )
         .arg(ClapArg::with_name("input")
             .help("Where data comes from")
@@ -225,7 +224,6 @@ fn get_opts() -> Opts {
             .short("i")
             .long("input")
             .multiple(true)
-            .value_name("INPUT")
         )
         .arg(ClapArg::with_name("output")
             .help("Where data goes to")
@@ -233,14 +231,12 @@ fn get_opts() -> Opts {
             .short("o")
             .long("output")
             .multiple(true)
-            .value_name("OUTPUT")
         )
         .arg(ClapArg::with_name("accounting")
             .help("Where to write statistics about what is happening")
             .takes_value(true)
             .short("a")
             .long("accounting")
-            .value_name("ACCOUNTING")
         )
         .arg(ClapArg::with_name("debug")
             .long("debug")
@@ -250,6 +246,7 @@ fn get_opts() -> Opts {
 
     Opts {
         graph: matches.is_present("graph"),
+        inline: matches.is_present("inline"),
         debug: matches.occurrences_of("debug"),
         tap: match matches.values_of("input") {
             None => {
@@ -303,25 +300,23 @@ fn get_opts() -> Opts {
 }
 
 
-fn fix_config(filename: &Path) -> JSONConfig {
+fn fix_config(mut opts: Opts) -> Opts {
 
-    let json = match std::fs::read_to_string(filename) {
+    if opts.inline {
+        return opts
+    }
+
+    opts.inline = true;
+    opts.pipeline = match std::fs::read_to_string(&opts.pipeline) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Could not read file '{}'\nError: {}", filename.to_string_lossy(), e);
+            eprintln!("Could not read file '{}'\nError: {}", &opts.pipeline, e);
             std::process::exit(1);
         }
     };
 
-    let jc: JSONConfig = match serde_json::from_str(&json) {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("Could JSON decode file '{}'.\n\nThe JSON error is '{}'", filename.to_string_lossy(), e);
-            std::process::exit(1);
-        }
-    };
 
-    jc
+    opts
 }
 
 type CommandString = Command<HashMap<String, String>, Vec<String>, String, String, String, String>;
@@ -607,7 +602,16 @@ fn main() {
         eprintln!("OPTS: {:?}", opts);
     }
 
-    let json_config = fix_config(Path::new(&opts.pipeline));
+    let opts = fix_config(opts);
+
+    let json_config: JSONConfig = match serde_json::from_str(&opts.pipeline) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("Could JSON decode pipeline.\n\nThe JSON error is '{}'", e);
+            std::process::exit(1);
+        }
+    };
+
     let config = json_config.convert_to_config();
 
     let mut identified = match identify(config.commands, config.outputs) {
