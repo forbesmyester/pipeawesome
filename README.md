@@ -90,7 +90,7 @@ Of course, the `TEMPERATURE_CHECKER` probably should send soup that is either to
 
 ![](./592db7a600d7a0970806184b4c784e46b5c6e92d.svg "`dot` image")
 
-```json file=examples/soup_back_to_kitchen.paspec.json
+```javascript file=examples/soup_back_to_kitchen.paspec.json5
 {
   "commands": [
     {
@@ -99,7 +99,7 @@ Of course, the `TEMPERATURE_CHECKER` probably should send soup that is either to
       "spec": {
         "command": "gawk",
         "path": ".",
-        "args": [ "BEGIN { FS=\":\" }{ print NR\": PREPERATION: \"$0\": 0\"; fflush(); }" ]
+        "args": [ 'BEGIN { FS=":" }{ print NR": PREPERATION: "$0": 0"; fflush(); }' ]
       }
     },
     {
@@ -109,14 +109,37 @@ Of course, the `TEMPERATURE_CHECKER` probably should send soup that is either to
         { "name": "LEAVING_TO_COOL", "port": "OUT" },
         { "name": "ADDING_MORE_HEAT", "port": "OUT" }
       ],
-      "spec": { "command": "gawk", "args": [ "BEGIN{FS=\":\"} { cmd = \"echo \"$3\" | bc\" ; cmd | getline res ; close(cmd); print $1\": \"$2\":\"$3\": \"res; fflush() }"] }
+      "spec": {
+        "command": "gawk",
+        "args": [ '\
+          BEGIN{FS=":"} \
+          { \
+          cmd = "echo "$3" | bc"; \
+          cmd | getline res; \
+          close(cmd); \
+          print $1": "$2":"$3": "res; \
+          fflush(); \
+          }'
+        ]
+      }
     },
     {
       "name": "TEMPERATURE_CHECKER_QA",
       "src": [ { "name": "TEMPERATURE_CHECKER_MATHS", "port": "OUT" } ],
       "spec": {
         "command": "gawk",
-        "args": [ "BEGIN { FS=\":\" }{ if ($4 < 88) print $1\": TOO_COLD:\"$3\":\"$4; else if ($4 > 93) print $1\": TOO_HOT:\"$3\":\"$4; else print $1\": JUST_RIGHT:\"$3\":\"$4; fflush() }" ]
+        "args": [ '\
+          BEGIN { FS=":" } \
+          { \
+            if ($4 < 88) \
+              print $1": TOO_COLD:"$3":"$4; \
+            else if ($4 > 93) \
+              print $1": TOO_HOT:"$3":"$4; \
+            else \
+              print $1": JUST_RIGHT:"$3":"$4; \
+            fflush() \
+          }'
+        ]
       }
     },
     {
@@ -132,25 +155,53 @@ Of course, the `TEMPERATURE_CHECKER` probably should send soup that is either to
     {
       "name": "TOO_COLD_FILTER",
       "src": [ { "name": "TEMPERATURE_CHECKER_QA", "port": "OUT" } ],
-      "spec": { "command": "grep", "args": [ "--line-buffered", "TOO_COLD" ], "env": { "POSIXLY_CORRECT": "1" } }
+      "spec": { "command": "grep", "args": [ "--line-buffered", "TOO_COLD" ] }
     },
     {
       "name": "LEAVING_TO_COOL",
       "src": [ { "name": "TOO_HOT_FILTER", "port": "OUT" } ],
-      "spec": { "command": "gawk", "args": [ "-v", "max=10", "-v", "min=1", "BEGIN { FS=\":\"; srand(seed) }{ print $1\": \"$2\":\"$3\" - \"int((rand() * (max - min)) + min)\": 0\"; fflush() }" ] }
+      "spec": {
+        "command": "gawk",
+        "args": [
+          "-v", "max=10",
+          "-v", "min=1",
+          '\
+          BEGIN { FS=":"; srand(seed) } \
+          { \
+            print $1": "$2":"$3" - "int((rand() * (max - min)) + min)": 0"; \
+            fflush(); \
+          }'
+        ]
+      }
     },
     {
       "name": "ADDING_MORE_HEAT",
       "src": [ { "name": "TOO_COLD_FILTER", "port": "OUT" } ],
-      "spec": { "command": "gawk", "args": [ "-v", "max=30", "-v", "min=5", "BEGIN { FS=\":\"; srand(seed) }{ print $1\": \"$2\":\"$3\" + \"int((rand() * (max - min)) + min)\": 0\"; fflush() }" ] }
+      "spec": {
+        "command": "gawk",
+        "args": [
+          "-v", "max=30",
+          "-v", "min=5",
+          '\
+          BEGIN { FS=":"; srand(seed) } \
+          { \
+            print $1": "$2":"$3" + "int((rand() * (max - min)) + min)": 0"; \
+            fflush(); \
+          }'
+        ]
+      }
     }
   ],
-  "outputs": { "RESTAURANT": [ { "name": "JUST_RIGHT", "port": "OUT" } ] }
+  "outputs": {
+    "RESTAURANT": [
+      { "name": "JUST_RIGHT", "port": "OUT" }
+    ]
+  }
 }
 ```
 
 ```bash
-$ ./target/debug/pipeawesome -p examples/soup_back_to_kitchen.paspec.json \
+$ ./target/debug/pipeawesome -p "$(cat examples/soup_back_to_kitchen.paspec.json5 | json5)" \
         -i INGREDIENTS=tests/pipeawesome/soup_temperature.input.txt \
         -o RESTAURANT=-
 4: JUST_RIGHT: 4 + 51 + 2 + 33: 90
@@ -222,7 +273,7 @@ The configuration file forms a directed graph.  In the end I designed a JSON (gr
 
 For simple, and even at it's most complicated, the configuration looks like the following:
 
-```json file=examples/temperature_prope.paspec.json5
+```javascript file=examples/temperature_prope.paspec.json5
 {
   "commands": [
     {

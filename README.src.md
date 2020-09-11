@@ -88,11 +88,11 @@ digraph {
 }
 ```
 
-```json file=examples/soup_back_to_kitchen.paspec.json
+```javascript file=examples/soup_back_to_kitchen.paspec.json5
 ```
 
 ```bash
-$ ./target/debug/pipeawesome -p examples/soup_back_to_kitchen.paspec.json \
+$ ./target/debug/pipeawesome -p "$(cat examples/soup_back_to_kitchen.paspec.json5 | json5)" \
         -i INGREDIENTS=tests/pipeawesome/soup_temperature.input.txt \
         -o RESTAURANT=-
 4: JUST_RIGHT: 4 + 51 + 2 + 33: 90
@@ -171,7 +171,7 @@ The configuration file forms a directed graph.  In the end I designed a JSON (gr
 
 For simple, and even at it's most complicated, the configuration looks like the following:
 
-```json file=examples/temperature_prope.paspec.json5
+```javascript file=examples/temperature_prope.paspec.json5
 ```
 
 In this file format:
