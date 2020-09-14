@@ -10,7 +10,6 @@ UNIX pipes are wonderful as when you write software using them they have:
 
 -   High performance.
 -   Back Pressure.
--   Buffering.
 -   Really easy to reason about at the individual UNIX process level (it's just STDIN and STDOUT/STDERR).
 -   Easy to reason about what data enters individual processes.
 -   Insanely light and zero infrastructure compared to a "proper" solution.
@@ -68,9 +67,9 @@ This could be specified with the configuration file below:
 To run this file you do the following:
 
 ```bash
-$  echo -e "44\n90\n92\n99\n33" | ./target/debug/pipeawesome \
-        -n -p "$(cat examples/temperature_prope.paspec.json5 | json5)" \
-        -i KITCHEN=- -o RESTAURANT=-
+$  echo -e "44\n90\n92\n99\n33" | pipeawesome \
+        --inline --pipeline "$(cat examples/temperature_prope.paspec.json5 | json5)" \
+        --input KITCHEN=- --output RESTAURANT=-
 TOO_COLD:44
 JUST_RIGHT:90
 JUST_RIGHT:92
@@ -82,7 +81,7 @@ NOTE 1: `-o RESTAURANT=-` means the output "RESTAURANT" should go to STDOUT.
 You can also use an underscore (`_`) to mean STDERR. If it is neither of
 these it will be interpreted as a filename which will be wrote to.
 
-NOTE 2: Without `-n` the `-p` parameter is a filename which must be valid JSON. I wanted to use JSON5 here so I could add meaningful comments, hence the `-n`, `-p` `cat` combination.
+NOTE 2: Without `--inline` the `--pipeline` parameter is a filename which must be valid JSON. I wanted to use JSON5 here so I could add meaningful comments, hence the `--inline --pipeline $(cat … | json5)` combination.
 
 ## An example which shows how real value could be realized.
 
@@ -218,7 +217,7 @@ NOTE: We explain why we had to CTRL-C later on.
 
 Pipeawesome will exit when all outputs have been closed (or programs which have no outgoing connections have exited).
 
-In Pipeawesome, when a programs exits, it's output is closed, so we close STDIN for the next program, which could (when it has finished processing) then exit and its output is closed. Of course when each program finishes processing is at some indeterminate point in the future and not necessarily related to it's input.
+In Pipeawesome, when a programs exits, it's output is closed, so we close STDIN for the next program, which could (when it has finished processing) then exit and its output is closed. When each program actually finishes processing and flushes its output is at some indeterminate point in the future and not necessarily related to it's input.
 
 The "problem" occurs when there is a loop. In the example above "PREPERATION" has closed it's own STDOUT but "TEMPERATURE_CHECKER_MATHS" has two more inputs. If you follow it back for one branch:
 
