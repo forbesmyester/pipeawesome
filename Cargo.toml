@@ -3,6 +3,7 @@ name = "pipeawesome"
 version = "0.1.0"
 authors = ["Matthew Forrester <matthew.forrester@speechmarks.com>"]
 edition = "2018"
+default-run = "pipeawesome"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
