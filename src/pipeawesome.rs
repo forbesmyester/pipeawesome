@@ -181,6 +181,66 @@ fn test_find_graph_taps() {
 }
 
 
+fn check_taps_can_go_everywhere(graph: &TheGraph) -> bool {
+
+    for ni in graph.node_indices() {
+        let mut found = false;
+        for t in graph.externals(Direction::Incoming) {
+            found = found || petgraph::algo::has_path_connecting(graph, t, ni, None);
+            continue;
+        }
+        if found == false {
+            return false;
+        }
+    }
+
+    true
+
+}
+
+
+#[test]
+fn test_check_taps_can_go_everywhere() {
+
+    use petgraph::stable_graph::StableGraph;
+
+    // With taps
+    let mut g1 = StableGraph::<String, u32, petgraph::Directed, u32>::new();
+    let g1_a = g1.add_node("A".to_owned());
+    let g1_b = g1.add_node("B".to_owned());
+    g1.extend_with_edges(&[
+        (g1_a, g1_b, 2)
+    ]);
+    assert_eq!(true, check_taps_can_go_everywhere(&g1));
+
+    // Just a cycle
+    let mut g2 = StableGraph::<String, u32, petgraph::Directed, u32>::new();
+    let g2_a = g2.add_node("A".to_owned());
+    let g2_b = g2.add_node("B".to_owned());
+    let g2_c = g2.add_node("C".to_owned());
+    g2.extend_with_edges(&[
+        (g2_a, g2_b, 2),
+        (g2_b, g2_c, 2),
+        (g2_c, g2_a, 2)
+    ]);
+    assert_eq!(false, check_taps_can_go_everywhere(&g2));
+
+    // Two graphs
+    let mut g3 = StableGraph::<String, u32, petgraph::Directed, u32>::new();
+    let g3_a = g3.add_node("A".to_owned());
+    let g3_b = g3.add_node("B".to_owned());
+    let g3_c = g3.add_node("C".to_owned());
+    let g3_d = g3.add_node("D".to_owned());
+    g3.extend_with_edges(&[
+        (g3_a, g3_b, 2),
+        (g3_c, g3_d, 2),
+    ]);
+    assert_eq!(true, check_taps_can_go_everywhere(&g3));
+
+
+}
+
+
 #[derive(Debug)]
 struct Opts {
     debug: u64,
@@ -631,6 +691,11 @@ fn main() {
         std::process::exit(0);
     }
 
+    if !check_taps_can_go_everywhere(&identified.graph) {
+        eprintln!("Error because there are places that can not be reached by an input");
+        std::process::exit(1);
+    }
+
     let mut builders: Vec<Builder<JSONLaunchSpec>> = identified.spec.into_iter().collect();
     let program_in_out = ProgramInOut { taps: opts.tap, sinks: opts.sink };
     let mut controls = match construct(program_in_out, &mut builders) {
@@ -641,6 +706,11 @@ fn main() {
         }
     };
 
+    if builders.len() == 0 {
+        eprintln!("NO BUILDERS!");
+        std::process::exit(1);
+    }
+
     let mut accounting_builder = AccountingBuilder::new(
         CHANNEL_SIZE,
         CHANNEL_HIGH_WATERMARK,
@@ -649,7 +719,6 @@ fn main() {
 
     let mut join_log: Vec<AccountingWriterJoinLogItem> = vec![];
 
-    // println!("B: {:?}", builders);
     for b in builders {
         if let Builder::JoinSpec(j) = b {
             match controls.join(&j) {

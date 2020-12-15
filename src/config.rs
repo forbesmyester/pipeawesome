@@ -436,6 +436,11 @@ fn test_find_graph_nodes() {
 fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<CommandDesire<L>>) -> BTreeSet<Builder<L>> {
 
 
+    let mut commands_seen: BTreeSet<String> = BTreeSet::new();
+    for line in &lines {
+        commands_seen.insert(line.name.clone());
+    }
+
     fn get_command<L>(lines: &mut Vec<CommandDesire<L>>, s: &str) -> Option<Builder<L>> {
         match decode_string_to_control(s) {
             Some((SpecType::CommandSpec, name)) => {
@@ -496,7 +501,9 @@ fn get_builder_spec<L>(graph: &TheGraph, nodes: &NodeMap, mut lines: Vec<Command
     }
 
     let mut r: BTreeSet<Builder<L>> = BTreeSet::new();
-    for tap in graph.externals(Direction::Incoming) {
+
+    // for tap in graph.externals(Direction::Incoming) {
+    for tap in graph.node_indices() {
         iterator(&graph, &nodes, &mut lines, tap, &mut r);
     }
 
@@ -737,6 +744,7 @@ fn add_sinks(mut graph: &mut TheGraph, mut nodes: &mut NodeMap, mut edge_id: &mu
 pub enum IdentifyError {
     UnconnectedNode(Vec<String>),
     DuplicateIdentifier(String),
+    CommandsNotUsed(Vec<String>),
 }
 
 
@@ -748,6 +756,13 @@ impl std::fmt::Display for IdentifyError {
                     f,
                     "IdentifyError: DuplicateIdentifier: There is more than one Command with the name '{}'",
                     s
+                )
+            }
+            IdentifyError::CommandsNotUsed(ss) => {
+                write!(
+                    f,
+                    "IdentifyError: CommandsNotUsed: The Commands '{}' are present but no builder exists",
+                    ss.join("', '")
                 )
             }
             IdentifyError::UnconnectedNode(ss) => {
@@ -762,24 +777,45 @@ impl std::fmt::Display for IdentifyError {
 }
 
 
+fn find_missing_from_builder_spec<L>(spec: &BTreeSet<Builder<L>>, commands_seen: &BTreeSet<String>) -> Vec<String> {
+
+    let commands_created: BTreeSet<String> = spec.iter().fold(
+        BTreeSet::new(),
+        |mut acc, builder| {
+            match builder {
+                Builder::CommandSpec(cs) => {
+                    acc.insert(cs.name.to_owned());
+                    acc
+                },
+                _ => acc
+            }
+        }
+    );
+
+    commands_seen.difference(&commands_created).cloned().map(
+        |s| s
+    ).collect()
+
+}
+
+
 pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Result<Specification<L>, IdentifyError> {
 
     let mut edge_id: u32 = 0;
     let mut nodes: NodeMap = HashMap::new();
     let mut graph: TheGraph = StableGraph::new();
 
-    let mut commands_seen: BTreeSet<&String> = BTreeSet::new();
+    let mut commands_seen: BTreeSet<String> = BTreeSet::new();
     let mut commands_with_no_src: BTreeSet<&String> = lines.iter()
         .filter(|line| line.src.is_empty())
         .map(|line| &line.name)
         .collect();
 
-
     for line in &lines {
-        if commands_seen.contains(&line.name) {
+        if commands_seen.contains(&(line.name).to_owned()) {
             return Err(IdentifyError::DuplicateIdentifier(line.name.to_owned()));
         }
-        commands_seen.insert(&line.name);
+        commands_seen.insert(line.name.clone());
         let dst_target = Destination { spec_type: SpecType::CommandSpec, name: line.name.clone() };
         let dst_c = get_control_node_from_destination(&mut graph, &mut nodes, &dst_target);
 
@@ -818,13 +854,22 @@ pub fn identify<L>(lines: Vec<CommandDesire<L>>, desired_sinks: Outputs) -> Resu
         patch_edge_weights(&mut graph, &nodes, &tap);
     }
 
+    let spec = get_builder_spec(&graph, &nodes, lines);
+
+    let missing = find_missing_from_builder_spec(&spec, &commands_seen);
+
+    if missing.len() > 0 {
+        return Err(IdentifyError::CommandsNotUsed(missing));
+    }
+
     Ok(Specification {
-        spec: get_builder_spec(&graph, &nodes, lines),
+        spec,
         graph,
         nodes,
     })
 
 }
+
 
 #[test]
 fn test_identify_orphan_commands() {
@@ -1268,6 +1313,69 @@ fn test_identify_loop() {
     expected.insert(Builder::TapSpec(TapSpec { name: "FAUCET".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
     expected.insert(Builder::SinkSpec(SinkSpec { name: "OUTPUT".to_owned() }));
+
+    // println!("{}", Dot::new(&result.graph));
+
+    assert_eq!(expected, result.spec);
+
+}
+
+
+#[test]
+fn test_identify_just_loop() {
+
+    let lines: Vec<CommandDesire<JSONLaunchSpec>> = vec![
+        CommandDesire {
+            name: "CLIENT".to_owned(),
+            src: vec![
+                Source { spec_type: SpecType::CommandSpec, name: "SERVER".to_owned(), port: Port::OUT },
+            ],
+            spec: JSONLaunchSpec {
+                command: "cat".to_owned(),
+                path: Some(".".to_owned()),
+                env: None,
+                args: Some(vec![])
+            },
+        },
+        CommandDesire {
+            name: "SERVER".to_owned(),
+            src: vec![Source { spec_type: SpecType::CommandSpec, name: "CLIENT".to_owned(), port: Port::OUT }],
+            spec: JSONLaunchSpec {
+                command: "grep".to_owned(),
+                path: Some(".".to_owned()),
+                env: None,
+                args: Some(vec!["^........".to_owned()])
+            },
+        }
+    ];
+
+    let outputs: Outputs = BTreeMap::new();
+    let result = identify(lines, outputs).unwrap();
+
+    let mut expected: BTreeSet<Builder<JSONLaunchSpec>> = BTreeSet::new();
+
+    expected.insert(Builder::CommandSpec(CommandSpec { name: "CLIENT".to_owned(), spec: JSONLaunchSpec {
+        command: "cat".to_owned(),
+        path: Some(".".to_owned()),
+        env: None,
+        args: Some(vec![])
+    } }));
+
+    expected.insert(Builder::CommandSpec(CommandSpec { name: "SERVER".to_owned(), spec: JSONLaunchSpec {
+        command: "grep".to_owned(),
+        path: Some(".".to_owned()),
+        env: None,
+        args: Some(vec!["^........".to_owned()])
+    } }));
+
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_0".to_owned() }));
+    expected.insert(Builder::BufferSpec(BufferSpec { name: "BUFFER_1".to_owned() }));
+
+
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 3, src: Source { spec_type: SpecType::CommandSpec, name: "SERVER".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_1".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 4, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_1".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "CLIENT".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 3, src: Source { spec_type: SpecType::CommandSpec, name: "CLIENT".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned() } }));
+    expected.insert(Builder::JoinSpec(JoinSpec { priority: 4, src: Source { spec_type: SpecType::BufferSpec, name: "BUFFER_0".to_owned(), port: Port::OUT }, dst: Destination { spec_type: SpecType::CommandSpec, name: "SERVER".to_owned() } }));
 
     // println!("{}", Dot::new(&result.graph));
 
