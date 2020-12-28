@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -euo pipefail
+IFS=$'\n\t'
+
+OUTPUT_NAME="$1"
+FILENAME="$2"
+
+declare -a NEW_IDS=()
+
+COMMANDS=$(jq .commands < "$FILENAME")
+PROCESSORS=$(jq -r '.commands[] | .name' < "$FILENAME")
+for PROCESSOR in $PROCESSORS; do
+    for PORT in $(printf "OUT\tERR\tEXIT"); do
+        NEW_ID="$(uuidgen)" 
+        NEW_IDS+=("$NEW_ID")
+        NEW_DATA=$(
+            jo \
+                name="$NEW_ID"\
+                src="[$(jo name="$PROCESSOR" port="$PORT")]" \
+                spec="$(jo command="awk" args="$(jo -a "{ print \"$OUTPUT_NAME: $PROCESSOR: $PORT: \" \$0; fflush(); }")")"
+        )
+        COMMANDS=$(echo "$COMMANDS" | jq ". + [${NEW_DATA}]")
+    done
+done
+
+NEW_OUTPUTS="[]"
+for NEW_ID in "${NEW_IDS[@]}"; do
+    NEW_OUTPUT=$(jo name="$NEW_ID" port="OUT")
+    NEW_OUTPUTS=$(echo "$NEW_OUTPUTS" | jq ". + [$NEW_OUTPUT"])
+done
+
+
+
+COMPLETE_OUTPUTS="$(jq ".outputs + $(jo "$OUTPUT_NAME=$NEW_OUTPUTS")" < "$FILENAME")"
+jq -S -M ". + {\"commands\": ${COMMANDS}, \"outputs\": $COMPLETE_OUTPUTS}" < "$FILENAME"
