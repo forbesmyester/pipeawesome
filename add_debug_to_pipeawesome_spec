@@ -3,25 +3,119 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+show_help() {
+    echo "NAME:"
+    echo "  $0 Analyze a PipeAwesome spec file and add debug outputs"
+    echo ""
+    echo "USAGE:"
+    echo "  $0 [-e] [-x] [-o] [-u] OUTPUT_NAME FILENAME"
+    echo ""
+    echo "GLOBAL OPTIONS:"
+    echo "  -x = Output Exit Statuses"
+    echo "  -e = Output STDERR"
+    echo "  -o = Output STDOUT"
+    echo "  -u = Output used output also"
+    echo "  -h = Show help"
+    echo ""
+    exit 0
+}
+
+OUTPUT_ONLY_UNCONSUMED=1
+OUTPUT_STDOUT=0
+OUTPUT_STDERR=0
+OUTPUT_EXIT=0
+
+while getopts "xeouh" opt; do
+    case "$opt" in
+        x)  OUTPUT_EXIT=1
+            ;;
+        e)  OUTPUT_STDERR=1
+            ;;
+        o)  OUTPUT_STDOUT=1
+            ;;
+        u)
+            OUTPUT_ONLY_UNCONSUMED=0
+            ;;
+        h)
+            show_help
+            exit 0
+            ;;
+        *)
+            show_help
+            exit 1
+            ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+
 OUTPUT_NAME="$1"
 FILENAME="$2"
 
-declare -a NEW_IDS=()
+CONSUMED_JSON="$( jq -c '.outputs[][] | {name: .name, port: .port}' < "$FILENAME" && jq -c '.commands[] | .src[]' < "$FILENAME" )"
+declare -A CONSUMED
+for J2 in $CONSUMED_JSON; do
+    K=$(echo "$J2" | jq -r .name)
+    set +u
+    if [[ ${CONSUMED[$K]} ]]; then
+        CONSUMED["$K"]="$(printf "%s\n%s" "${CONSUMED[$K]}" "$(echo "$J2" | jq -r .port)" )"
+    else
+        CONSUMED["$K"]="$(echo "$J2" | jq -r .port)"
+    fi
+    set -u
+done
 
-COMMANDS=$(jq .commands < "$FILENAME")
-PROCESSORS=$(jq -r '.commands[] | .name' < "$FILENAME")
+PORT_LOOP=""
+[ "$OUTPUT_STDOUT" -gt 0 ] && PORT_LOOP=$(printf "%s\tOUT" "${PORT_LOOP}")
+[ "$OUTPUT_STDERR" -gt 0 ] && PORT_LOOP=$(printf "%s\tERR" "${PORT_LOOP}")
+[ "$OUTPUT_EXIT" -gt 0 ] && PORT_LOOP=$(printf "%s\tEXIT" "${PORT_LOOP}")
+[ -n "$PORT_LOOP" ] && PORT_LOOP="${PORT_LOOP:1}"
+
+function add_processor {
+    local OUTPUT_NAME=$1
+    local PROCESSOR=$2
+    local PORT=$3
+    jo \
+        name="$NEW_ID"\
+        src="[$(jo name="$PROCESSOR" port="$PORT")]" \
+        spec="$(jo command="awk" args="$(jo -a "{ print \"$OUTPUT_NAME: $PROCESSOR: $PORT: \" \$0; fflush(); }")")"
+}
+
+declare -a NEW_IDS=()
+NEW_COMMANDS=$(jq .commands < "$FILENAME")
+PROCESSORS=$( (jq -r '.commands[] | .name' < "$FILENAME") | sort | uniq)
 for PROCESSOR in $PROCESSORS; do
-    for PORT in $(printf "OUT\tERR\tEXIT"); do
+    for PORT in $PORT_LOOP; do
+        if [ "$OUTPUT_ONLY_UNCONSUMED" -gt 0 ]; then
+            set +euo pipefail
+            if [[ ${CONSUMED[$PROCESSOR]} ]]; then
+                echo "${CONSUMED[$PROCESSOR]}" | grep -q -w "$PORT" > /dev/null
+                E=$?
+                if [[ "$E" -eq 0 ]]; then
+                    echo "CONTINUE: $PROCESSOR $PORT"
+                    continue
+                fi
+            fi
+            set -euo pipefail
+        fi
         NEW_ID="$(uuidgen)" 
         NEW_IDS+=("$NEW_ID")
-        NEW_DATA=$(
-            jo \
-                name="$NEW_ID"\
-                src="[$(jo name="$PROCESSOR" port="$PORT")]" \
-                spec="$(jo command="awk" args="$(jo -a "{ print \"$OUTPUT_NAME: $PROCESSOR: $PORT: \" \$0; fflush(); }")")"
-        )
-        COMMANDS=$(echo "$COMMANDS" | jq ". + [${NEW_DATA}]")
+        NEW_DATA=$(add_processor "$OUTPUT_NAME" "$PROCESSOR" "$PORT")
+        NEW_COMMANDS=$(echo "$NEW_COMMANDS" | jq ". + [${NEW_DATA}]")
     done
+done
+
+POSSIBLE_TAPS=$(jq -r -c '.commands[] | .src[] | .name' < "$FILENAME")
+for POSSIBLE_TAP in $POSSIBLE_TAPS; do
+    set +e
+    echo "$PROCESSORS" | grep -q -w "$POSSIBLE_TAP" > /dev/null
+    TODO=$?
+    set -e
+    if [ "$TODO" -gt 0 ]; then
+    NEW_ID="$(uuidgen)" 
+    NEW_IDS+=("$NEW_ID")
+    NEW_DATA=$(add_processor "$OUTPUT_NAME" "$POSSIBLE_TAP" "OUT")
+    NEW_COMMANDS=$(echo "$NEW_COMMANDS" | jq ". + [${NEW_DATA}]")
+    fi
 done
 
 NEW_OUTPUTS="[]"
@@ -33,4 +127,4 @@ done
 
 
 COMPLETE_OUTPUTS="$(jq ".outputs + $(jo "$OUTPUT_NAME=$NEW_OUTPUTS")" < "$FILENAME")"
-jq -S -M ". + {\"commands\": ${COMMANDS}, \"outputs\": $COMPLETE_OUTPUTS}" < "$FILENAME"
+jq -S -M ". + {\"commands\": ${NEW_COMMANDS}, \"outputs\": $COMPLETE_OUTPUTS}" < "$FILENAME"
