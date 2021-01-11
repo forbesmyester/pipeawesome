@@ -257,7 +257,7 @@ impl <R: GetRead + Send> InputOutput for Tap<R> {
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
-        if let Port::ERR = s {
+        if *s != Port::OUT {
             return Err(CannotAllocateOutputError::CannotAllocateOutputError);
         }
 

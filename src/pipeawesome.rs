@@ -395,6 +395,7 @@ struct Controls {
 enum JoinError{
     Destination(SpecType, ControlId),
     Source(SpecType, ControlId, Port),
+    CannotAllocateOutputError(SpecType, ControlId, Port),
 }
 
 impl std::fmt::Display for JoinError {
@@ -405,6 +406,9 @@ impl std::fmt::Display for JoinError {
             }
             JoinError::Source(s, c, p) => {
                 write!(f, "JoinError: Source: {:?}:{:?}:{:?}", s, c, p)
+            }
+            JoinError::CannotAllocateOutputError(s, c, p) => {
+                write!(f, "JoinError: CannotAllocateOutputError: {:?}:{:?}:{:?}", s, c, p)
             }
         }
     }
@@ -452,9 +456,13 @@ impl Controls {
         r
     }
 
-    fn get_output_rx(&mut self, spec_type: SpecType, name: &str, port: &Port) -> Option<Connected> {
-        let src: &mut dyn InputOutput = self.get_mut(spec_type, name)?;
-        src.get_output(port, CHANNEL_SIZE).ok()
+    fn get_output_rx(&mut self, spec_type: SpecType, name: &str, port: &Port) -> Result<Option<Connected>, CannotAllocateOutputError> {
+        let osrc: Option<&mut dyn InputOutput> = self.get_mut(spec_type, name);
+        if let Some(src) = osrc {
+            let c = src.get_output(port, CHANNEL_SIZE)?;
+            return Ok(Some(c))
+        }
+        Ok(None)
     }
 
 
@@ -466,13 +474,14 @@ impl Controls {
 
     fn join(&mut self, j: &JoinSpec) -> Result<(ConnectionId, ConnectionId), JoinError> {
         match self.get_output_rx(j.src.spec_type, &j.src.name, &j.src.port) {
-            Some(connected) => {
+            Ok(Some(connected)) => {
                 match self.set_input(j.dst.spec_type, &j.dst.name, j.priority, connected.0) {
                     Some(c2) => Ok((connected.1, c2)),
                     None => Err(JoinError::Destination(j.dst.spec_type, j.dst.name.to_owned()))
                 }
             },
-            None => Err(JoinError::Source(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
+            Ok(None) => Err(JoinError::Source(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
+            Err(_) => Err(JoinError::CannotAllocateOutputError(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
         }
     }
 
@@ -705,7 +714,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-
+    
     if builders.len() == 0 {
         eprintln!("NO BUILDERS!");
         std::process::exit(1);
