@@ -392,10 +392,13 @@ struct Controls {
     sink_file: HashMap<String, Sink<FileGetWrite<String>>>,
 }
 
-enum JoinError{
+enum JoinError {
     Destination(SpecType, ControlId),
     Source(SpecType, ControlId, Port),
-    CannotAllocateOutputError(SpecType, ControlId, Port),
+    SourcePortAlreadyTaken(SpecType, ControlId, Port),
+    SourcePortNotOnControlType(SpecType, ControlId, Port),
+    DestinationPortAlreadyTaken(SpecType, ControlId),
+    DestinationPortNotOnControlType(SpecType, ControlId),
 }
 
 impl std::fmt::Display for JoinError {
@@ -403,13 +406,22 @@ impl std::fmt::Display for JoinError {
         match self {
             JoinError::Destination(s, c) => {
                 write!(f, "JoinError: Destination: {:?}:{:?}", s, c)
-            }
+            },
             JoinError::Source(s, c, p) => {
                 write!(f, "JoinError: Source: {:?}:{:?}:{:?}", s, c, p)
-            }
-            JoinError::CannotAllocateOutputError(s, c, p) => {
-                write!(f, "JoinError: CannotAllocateOutputError: {:?}:{:?}:{:?}", s, c, p)
-            }
+            },
+            JoinError::SourcePortNotOnControlType(s, c, p) => {
+                write!(f, "JoinError: SourcePortNotOnControlType: {:?}:{:?}:{:?}", s, c, p)
+            },
+            JoinError::SourcePortAlreadyTaken(s, c, p) => {
+                write!(f, "JoinError: SourcePortAlreadyTaken: {:?}:{:?}:{:?}", s, c, p)
+            },
+            JoinError::DestinationPortNotOnControlType(s, c) => {
+                write!(f, "JoinError: DestinationPortNotOnControlType: {:?}:{:?}", s, c)
+            },
+            JoinError::DestinationPortAlreadyTaken(s, c) => {
+                write!(f, "JoinError: DestinationPortAlreadyTaken: {:?}:{:?}", s, c)
+            },
         }
     }
 }
@@ -466,23 +478,40 @@ impl Controls {
     }
 
 
-    fn set_input(&mut self, spec_type: SpecType, name: &str, priority: u32, input: Receiver<Line>) -> Option<ConnectionId> {
-        let dst: &mut dyn InputOutput = self.get_mut(spec_type, name)?;
-        dst.add_input(priority, input).ok()
+    fn set_input(&mut self, spec_type: SpecType, name: &str, priority: u32, input: Receiver<Line>) -> Result<Option<ConnectionId>,CannotAllocateInputError> {
+        let m = self.get_mut(spec_type, name).map(
+            |dst| dst.add_input(priority, input)
+        );
+        match m {
+            Some(Ok(x)) => Ok(Some(x)),
+            None => Ok(None),
+            Some(Err(x)) => Err(x),
+        }
     }
 
 
     fn join(&mut self, j: &JoinSpec) -> Result<(ConnectionId, ConnectionId), JoinError> {
-        match self.get_output_rx(j.src.spec_type, &j.src.name, &j.src.port) {
+
+        let connected = match self.get_output_rx(j.src.spec_type, &j.src.name, &j.src.port) {
             Ok(Some(connected)) => {
-                match self.set_input(j.dst.spec_type, &j.dst.name, j.priority, connected.0) {
-                    Some(c2) => Ok((connected.1, c2)),
-                    None => Err(JoinError::Destination(j.dst.spec_type, j.dst.name.to_owned()))
-                }
+                Ok(connected)
             },
             Ok(None) => Err(JoinError::Source(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
-            Err(_) => Err(JoinError::CannotAllocateOutputError(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
+            Err(CannotAllocateOutputError::PortNotAvailableForControl) => Err(JoinError::SourcePortNotOnControlType(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
+            Err(CannotAllocateOutputError::PortAlreadyTaken) => Err(JoinError::SourcePortAlreadyTaken(j.src.spec_type, j.src.name.to_owned(), j.src.port)),
+        }?;
+
+        match self.set_input(j.dst.spec_type, &j.dst.name, j.priority, connected.0) {
+            Ok(Some(c2)) => Ok((connected.1, c2)),
+            Ok(None) => Err(JoinError::Destination(j.dst.spec_type, j.dst.name.to_owned())),
+            Err(CannotAllocateInputError::PortNotAvailableForControl) => Err(
+                JoinError::DestinationPortNotOnControlType(j.dst.spec_type, j.dst.name.to_owned())
+            ),
+            Err(CannotAllocateInputError::PortAlreadyTaken) => Err(
+                JoinError::DestinationPortAlreadyTaken(j.dst.spec_type, j.dst.name.to_owned())
+            ),
         }
+
     }
 
 
@@ -745,7 +774,19 @@ fn main() {
                         ControlIO(j.dst.spec_type, j.dst.name, c2)
                     );
                 },
-                Err(e) => { panic!("{}", &e); }
+                Err(e) => {
+                    let msg = match e {
+                        JoinError::Destination(spec_type, control_id) => format!("Cannot find destination control {:?}:{:?}", spec_type, control_id),
+                        JoinError::Source(spec_type, control_id, port) => format!("Cannot find source control {:?}:{:?} (port {:?})'", spec_type, control_id, port),
+                        JoinError::SourcePortAlreadyTaken(spec_type, control_id, port) => format!("Port '{:?}' has already been allocated on {:?}:{:?}", port, spec_type, control_id),
+                        JoinError::DestinationPortAlreadyTaken(spec_type, control_id) => format!("Port 'Input' has already been allocated on {:?}:{:?}", spec_type, control_id),
+
+                        JoinError::SourcePortNotOnControlType(spec_type, control_id, port) => format!("Attempted to allocate port '{:?}' on {:?}:{:?} but it cannot exist on {:?}:{:?}", port, spec_type, control_id, spec_type, control_id),
+                        JoinError::DestinationPortNotOnControlType(spec_type, control_id) => format!("Attempted to allocate port 'Input' on {:?}:{:?} but it cannot exist on {:?}:{:?}", spec_type, control_id, spec_type, control_id),
+                    };
+                    eprintln!("Error contructing pipes:\n {}", msg);
+                    std::process::exit(1);
+                }
             }
         };
     }

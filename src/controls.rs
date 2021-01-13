@@ -53,13 +53,15 @@ impl std::fmt::Display for ProcessError {
 
 #[derive(Debug)]
 pub enum CannotAllocateOutputError {
-    CannotAllocateOutputError,
+    PortNotAvailableForControl,
+    PortAlreadyTaken,
 }
 
 impl std::fmt::Display for CannotAllocateOutputError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            CannotAllocateOutputError::CannotAllocateOutputError => write!(f, "CannotAllocateOutputError"),
+            CannotAllocateOutputError::PortAlreadyTaken => write!(f, "CannotAllocateOutputError::PortAlreadyTaken"),
+            CannotAllocateOutputError::PortNotAvailableForControl => write!(f, "CannotAllocateOutputError::PortNotAvailableForControl"),
         }
     }
 }
@@ -67,13 +69,15 @@ impl std::fmt::Display for CannotAllocateOutputError {
 
 #[derive(Debug)]
 pub enum CannotAllocateInputError {
-    CannotAllocateInputError,
+    PortAlreadyTaken,
+    PortNotAvailableForControl,
 }
 
 impl std::fmt::Display for CannotAllocateInputError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            CannotAllocateInputError::CannotAllocateInputError => write!(f, "CannotAllocateInputError"),
+            CannotAllocateInputError::PortAlreadyTaken => write!(f, "PortAlreadyTaken"),
+            CannotAllocateInputError::PortNotAvailableForControl => write!(f, "CannotAllocateInputError::PortNotAvailableForControl"),
         }
     }
 }
@@ -123,6 +127,10 @@ impl InputOutput for Buffer {
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
+        if self.tx.is_some() {
+            return Err(CannotAllocateOutputError::PortAlreadyTaken);
+        }
+
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
 
         match s {
@@ -130,7 +138,7 @@ impl InputOutput for Buffer {
                 self.tx = Some(tx);
                 Ok(Connected(rx, -1))
             },
-            _ => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+            _ => Err(CannotAllocateOutputError::PortNotAvailableForControl),
         }
 
     }
@@ -141,7 +149,7 @@ impl InputOutput for Buffer {
                 self.rx = Some(rx);
                 Ok(0)
             }
-            _ => Err(CannotAllocateInputError::CannotAllocateInputError)
+            _ => Err(CannotAllocateInputError::PortAlreadyTaken)
         }
     }
 }
@@ -258,7 +266,7 @@ impl <R: GetRead + Send> InputOutput for Tap<R> {
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
         if *s != Port::OUT {
-            return Err(CannotAllocateOutputError::CannotAllocateOutputError);
+            return Err(CannotAllocateOutputError::PortNotAvailableForControl);
         }
 
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
@@ -267,11 +275,12 @@ impl <R: GetRead + Send> InputOutput for Tap<R> {
             self.tx = Some(tx);
             return Ok(Connected(rx, -1))
         }
-        Err(CannotAllocateOutputError::CannotAllocateOutputError)
+
+        Err(CannotAllocateOutputError::PortAlreadyTaken)
     }
 
     fn add_input(&mut self, _: u32, _: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
-        Err(CannotAllocateInputError::CannotAllocateInputError)
+        Err(CannotAllocateInputError::PortNotAvailableForControl)
     }
 }
 
@@ -460,7 +469,7 @@ impl <W: GetWrite + Send> Sink<W> where {
 impl <W: GetWrite + Send> InputOutput for Sink<W> {
 
     fn get_output(&mut self, _: &Port, _channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
-        Err(CannotAllocateOutputError::CannotAllocateOutputError)
+        Err(CannotAllocateOutputError::PortNotAvailableForControl)
     }
 
     fn add_input(&mut self, _: u32, input: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
@@ -468,7 +477,7 @@ impl <W: GetWrite + Send> InputOutput for Sink<W> {
             self.input = Some(input);
             return Ok(0)
         }
-        Err(CannotAllocateInputError::CannotAllocateInputError)
+        Err(CannotAllocateInputError::PortAlreadyTaken)
     }
 }
 
@@ -715,7 +724,7 @@ impl <E: IntoIterator<Item = (K, V)>,
             self.stdin = Some(input);
             return Ok(0);
         }
-        Err(CannotAllocateInputError::CannotAllocateInputError)
+        Err(CannotAllocateInputError::PortAlreadyTaken)
     }
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
@@ -725,7 +734,7 @@ impl <E: IntoIterator<Item = (K, V)>,
         match s {
             Port::EXIT => {
                 match &self.exit {
-                    Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+                    Some(_) => Err(CannotAllocateOutputError::PortAlreadyTaken),
                     None => {
                         self.exit = Some(tx);
                         Ok(Connected(rx,-3))
@@ -734,7 +743,7 @@ impl <E: IntoIterator<Item = (K, V)>,
             },
             Port::ERR => {
                 match &self.stderr {
-                    Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+                    Some(_) => Err(CannotAllocateOutputError::PortAlreadyTaken),
                     None => {
                         self.stderr = Some(tx);
                         Ok(Connected(rx,-2))
@@ -743,7 +752,7 @@ impl <E: IntoIterator<Item = (K, V)>,
             },
             Port::OUT => {
                 match &self.stdout {
-                    Some(_) => Err(CannotAllocateOutputError::CannotAllocateOutputError),
+                    Some(_) => Err(CannotAllocateOutputError::PortAlreadyTaken),
                     None => {
                         self.stdout = Some(tx);
                         Ok(Connected(rx,-1))
@@ -1126,14 +1135,9 @@ impl Junction {
     }
 
     pub fn add_input_with_priority(&mut self, priority: usize, rx: Receiver<Line>) -> Result<ConnectionId, CannotAllocateInputError> {
-        match &self.config_stage {
-            true => {
-                let connection_id = self.input.len() as ConnectionId;
-                self.input.push((priority, (connection_id, rx)));
-                Ok(connection_id)
-            },
-            false => Err(CannotAllocateInputError::CannotAllocateInputError),
-        }
+        let connection_id = self.input.len() as ConnectionId;
+        self.input.push((priority, (connection_id, rx)));
+        Ok(connection_id)
     }
 
 }
@@ -1152,19 +1156,15 @@ impl InputOutput for Junction {
 
     fn get_output(&mut self, s: &Port, channel_size: usize) -> Result<Connected, CannotAllocateOutputError> {
 
-        if let Port::ERR = s {
-            return Err(CannotAllocateOutputError::CannotAllocateOutputError)
+        if *s != Port::OUT {
+            return Err(CannotAllocateOutputError::PortNotAvailableForControl)
         }
 
         let (tx, rx): (SyncSender<Line>, Receiver<Line>) = sync_channel(channel_size);
-        match &self.config_stage {
-            true => {
-                let id = -1 - (self.output.len() as ConnectionId);
-                self.output.push(tx);
-                Ok(Connected(rx, id))
-            },
-            false => Err(CannotAllocateOutputError::CannotAllocateOutputError),
-        }
+
+        let id = -1 - (self.output.len() as ConnectionId);
+        self.output.push(tx);
+        Ok(Connected(rx, id))
 
     }
 
